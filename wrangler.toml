@@ -1,0 +1,27 @@
+name = "grid-call"
+main = "src/worker.js"
+compatibility_date = "2026-09-01"
+
+# The built SPA. The Worker handles /api/* and hands everything else to ASSETS.
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# Results and the calendar refresh on their own, four-hourly.
+[triggers]
+crons = ["0 */4 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "grid-call"
+database_id = "PASTE_YOUR_DATABASE_ID_HERE"
+
+[vars]
+SEASON = "2026"
+USER_AGENT = "GridCall/1.0 (self-hosted F1 prediction game)"
+
+# Secrets are NOT here. Set them with `wrangler secret put`:
+#   JOIN_CODE        the code friends need to join
+#   SESSION_SECRET   a long random string for signing cookies
+#   ADMIN_CODE       elevates a player to organiser
