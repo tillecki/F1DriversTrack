@@ -8,9 +8,9 @@ directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 
-# Results and the calendar refresh on their own, four-hourly.
+# Hourly: new results in, notifications out.
 [triggers]
-crons = ["0 */4 * * *"]
+crons = ["0 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -20,8 +20,12 @@ database_id = "c0e58132-769c-4775-a444-50bc07a193b8"
 [vars]
 SEASON = "2026"
 USER_AGENT = "GridCall/1.0 (self-hosted F1 prediction game)"
+# From `npm run push:keys`. The public half is not a secret.
+VAPID_PUBLIC_KEY = "BPMdu6P9nTAPr3cmVotSB0CQApbk-PZElrRT6Q-o9O6sPcbjvDKGuTpSC2LWMlkpDI0iIaSNSCKaGX3rTg_MwOQ"
 
 # Secrets are NOT here. Set them with `wrangler secret put`:
 #   JOIN_CODE        the code friends need to join
 #   SESSION_SECRET   a long random string for signing cookies
 #   ADMIN_CODE       elevates a player to organiser
+#   VAPID_PRIVATE_JWK  the private half of the push keypair
+#   VAPID_SUBJECT      mailto: address, required by the push services

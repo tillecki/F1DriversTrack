@@ -113,9 +113,10 @@ const DEFAULT_SCORING = {
   favScale: 50,      // your favourite driver scores this percentage of the main curve
   poleExact: 15,     // named the pole-sitter
   poleFrontRow: 5,   // your pick qualified second
+  sprintScale: 40,   // sprint call scores this percentage of the main curve
 };
 
-const DEFAULT_MODES = { favourite: false, pole: false };
+const DEFAULT_MODES = { favourite: false, pole: false, sprint: false };
 
 async function getSettings(env) {
   const rows = await env.DB.prepare("SELECT k, v FROM settings").all();
@@ -166,16 +167,18 @@ async function syncSchedule(env, season) {
   if (!races.length) return 0;
   await env.DB.batch(races.map((r) =>
     env.DB.prepare(
-      `INSERT INTO rounds (season, round, name, circuit, cc, start, quali_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-       ON CONFLICT(season, round) DO UPDATE SET name=?3, circuit=?4, cc=?5, start=?6, quali_at=?7`
+      `INSERT INTO rounds (season, round, name, circuit, cc, start, quali_at, sprint_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+       ON CONFLICT(season, round) DO UPDATE SET name=?3, circuit=?4, cc=?5, start=?6,
+         quali_at=?7, sprint_at=?8`
     ).bind(
       Number(season), Number(r.round),
       r.raceName || "Round " + r.round,
       r.Circuit?.circuitName || "",
       countryToCC(r.Circuit?.Location?.country),
       (r.date || "") + "T" + (r.time || "13:00:00Z"),
-      r.Qualifying?.date ? r.Qualifying.date + "T" + (r.Qualifying.time || "14:00:00Z") : null
+      r.Qualifying?.date ? r.Qualifying.date + "T" + (r.Qualifying.time || "14:00:00Z") : null,
+      r.Sprint?.date ? r.Sprint.date + "T" + (r.Sprint.time || "14:00:00Z") : null
     )
   ));
   return races.length;
@@ -292,6 +295,18 @@ async function syncResult(env, season, round) {
   return results.length;
 }
 
+async function syncSprint(env, season, round) {
+  const data = await jolpica(env, season + "/" + round + "/sprint/?limit=100");
+  const sp = data?.MRData?.RaceTable?.Races?.[0]?.SprintResults || [];
+  if (!sp.length) return 0;
+  await env.DB.prepare("DELETE FROM sprint WHERE season = ?1 AND round = ?2").bind(Number(season), Number(round)).run();
+  await env.DB.batch(sp.map((r) =>
+    env.DB.prepare("INSERT INTO sprint (season, round, pos, driver_id) VALUES (?1, ?2, ?3, ?4)")
+      .bind(Number(season), Number(round), Number(r.position), r.Driver.driverId)
+  ));
+  return sp.length;
+}
+
 async function syncQuali(env, season, round) {
   const data = await jolpica(env, season + "/" + round + "/qualifying/?limit=100");
   const q = data?.MRData?.RaceTable?.Races?.[0]?.QualifyingResults || [];
@@ -336,6 +351,18 @@ async function syncAll(env, season) {
       try { if (await syncQuali(env, season, row.round)) qualis++; } catch { /* skip */ }
     }
 
+    /* Sprints only exist on some weekends, so a 404 here is normal. */
+    await note({ busy: true, step: "sprints" });
+    const sdue = await env.DB.prepare(
+      `SELECT round FROM rounds WHERE season = ?1 AND sprint_at IS NOT NULL AND sprint_at <= ?2
+         AND round NOT IN (SELECT round FROM sprint WHERE season = ?1)
+       ORDER BY round`
+    ).bind(Number(season), new Date().toISOString()).all();
+    let sprints = 0;
+    for (const row of sdue.results || []) {
+      try { if (await syncSprint(env, season, row.round)) sprints++; } catch { /* skip */ }
+    }
+
     await note({ busy: true, step: "portraits" });
     const photos = await syncPhotos(env, season);
 
@@ -346,7 +373,7 @@ async function syncAll(env, season) {
        ) WHERE season = ?1`
     ).bind(Number(season)).run();
 
-    await note({ busy: false, ok: true, schedule, drivers, races, qualis, photos });
+    await note({ busy: false, ok: true, schedule, drivers, races, qualis, sprints, photos });
   } catch (e) {
     await note({ busy: false, ok: false, error: String(e.message || e) });
   }
@@ -362,6 +389,123 @@ const CC_BY_COUNTRY = {
 };
 
 const countryToCC = (c) => CC_BY_COUNTRY[String(c || "").toLowerCase()] || "";
+
+/* ---------- web push ---------- */
+
+/* Push is sent without a payload. That avoids the whole aes128gcm encryption
+   dance in RFC 8291 — the service worker just wakes up and asks the server
+   what happened. Only the VAPID signature is needed. */
+
+const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+async function vapidHeader(env, endpoint) {
+  const aud = new URL(endpoint).origin;
+  const head = b64url(enc.encode(JSON.stringify({ typ: "JWT", alg: "ES256" })));
+  const body = b64url(enc.encode(JSON.stringify({
+    aud, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: env.VAPID_SUBJECT || "mailto:admin@example.com",
+  })));
+  const key = await crypto.subtle.importKey(
+    "jwk", JSON.parse(env.VAPID_PRIVATE_JWK), { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]
+  );
+  /* WebCrypto returns r||s raw, which is exactly what JWS ES256 wants. */
+  const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, enc.encode(head + "." + body));
+  return "vapid t=" + head + "." + body + "." + b64url(sig) + ", k=" + env.VAPID_PUBLIC_KEY;
+}
+
+/** Wake up some players' browsers. Dead subscriptions are pruned as we go. */
+async function pushTo(env, playerIds) {
+  if (!env.VAPID_PRIVATE_JWK || !env.VAPID_PUBLIC_KEY) return 0;
+  if (!playerIds.length) return 0;
+  const marks = playerIds.map((_, i) => "?" + (i + 1)).join(",");
+  const subs = await env.DB.prepare("SELECT endpoint FROM push_subs WHERE player_id IN (" + marks + ")")
+    .bind(...playerIds).all();
+  let sent = 0;
+  for (const sub of subs.results || []) {
+    try {
+      const res = await fetch(sub.endpoint, {
+        method: "POST",
+        headers: { TTL: "10800", Authorization: await vapidHeader(env, sub.endpoint) },
+      });
+      if (res.status === 404 || res.status === 410) {
+        await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ?1").bind(sub.endpoint).run();
+      } else if (res.ok) sent++;
+    } catch { /* one bad endpoint shouldn't stop the rest */ }
+  }
+  return sent;
+}
+
+/** What the service worker shows, worked out when the browser asks. */
+async function pendingNotice(env, season, meId) {
+  const st = await buildState(env, season, meId);
+  const next = st.rounds.find((r) => !r.locked);
+  const justDone = [...st.rounds].reverse().find((r) => r.result);
+
+  if (next) {
+    const mine = next.picks && next.picks.mine;
+    const hrs = Math.round((new Date(next.start) - Date.now()) / 3600000);
+    if (!mine || !mine.pos) {
+      return {
+        title: next.name,
+        body: hrs <= 48
+          ? "Calls close in " + (hrs < 1 ? "under an hour" : hrs + " hours") + " and yours isn't in yet."
+          : "A new round is open. Make your call.",
+        tag: "call-" + next.round,
+      };
+    }
+  }
+  if (justDone) {
+    const lead = st.standings[0];
+    const who = lead ? st.players.find((p) => p.id === lead.id) : null;
+    return {
+      title: justDone.name + " result is in",
+      body: who ? who.name + " leads on " + lead.pts + " points." : "See how everyone did.",
+      tag: "result-" + justDone.round,
+    };
+  }
+  return { title: "Grid Call", body: "Something has changed.", tag: "general" };
+}
+
+/** Cron decides who to nudge. Each nudge is sent once, tracked in settings. */
+async function runNotifications(env, season) {
+  if (!env.VAPID_PRIVATE_JWK) return;
+  const cfg = await getSettings(env);
+  const done = cfg.notified || {};
+  const st = await buildState(env, season, null);
+  const now = Date.now();
+  let changed = false;
+
+  /* Three hours before lights out, nudge whoever hasn't called. */
+  const next = st.rounds.find((r) => !r.locked);
+  if (next) {
+    const hrs = (new Date(next.start) - now) / 3600000;
+    const key = "call-" + next.round;
+    if (hrs > 0 && hrs <= 3 && !done[key]) {
+      const q = await env.DB.prepare(
+        "SELECT player_id FROM picks WHERE season = ?1 AND round = ?2 AND pos IS NOT NULL"
+      ).bind(season, next.round).all();
+      const called = new Set((q.results || []).map((r) => r.player_id));
+      const silent = st.players.filter((p) => !called.has(p.id)).map((p) => p.id);
+      await pushTo(env, silent);
+      done[key] = now; changed = true;
+    }
+  }
+
+  /* And tell everyone when a result lands. */
+  const fresh = [...st.rounds].reverse().find((r) => r.result);
+  if (fresh) {
+    const key = "result-" + fresh.round;
+    if (!done[key]) {
+      await pushTo(env, st.players.map((p) => p.id));
+      done[key] = now; changed = true;
+    }
+  }
+
+  if (changed) {
+    for (const k of Object.keys(done)) if (now - done[k] > 30 * 86400_000) delete done[k];
+    await putSetting(env, "notified", done);
+  }
+}
 
 /* ---------- the game model ---------- */
 
@@ -404,13 +548,14 @@ function scoreFor(guess, actual, s) {
 /** Everything the app needs, assembled once. */
 async function buildState(env, season, meId) {
   const cfg = await getSettings(env);
-  const [playersQ, driversQ, roundsQ, resultsQ, qualiQ, picksQ] = await Promise.all([
+  const [playersQ, driversQ, roundsQ, resultsQ, qualiQ, sprintQ, picksQ] = await Promise.all([
     env.DB.prepare("SELECT id, name, photo, color, favourite, is_admin FROM players ORDER BY joined").all(),
     env.DB.prepare("SELECT id, first, last, code, no, team, photo, wiki, active, starts FROM drivers WHERE season = ?1 ORDER BY id").bind(season).all(),
-    env.DB.prepare("SELECT round, name, circuit, cc, start, quali_at FROM rounds WHERE season = ?1 ORDER BY round").bind(season).all(),
+    env.DB.prepare("SELECT round, name, circuit, cc, start, quali_at, sprint_at FROM rounds WHERE season = ?1 ORDER BY round").bind(season).all(),
     env.DB.prepare("SELECT round, pos, driver_id FROM results WHERE season = ?1 ORDER BY round, pos").bind(season).all(),
     env.DB.prepare("SELECT round, pos, driver_id FROM quali WHERE season = ?1 ORDER BY round, pos").bind(season).all(),
-    env.DB.prepare("SELECT round, player_id, pos, fav_pos, pole_driver FROM picks WHERE season = ?1").bind(season).all(),
+    env.DB.prepare("SELECT round, pos, driver_id FROM sprint WHERE season = ?1 ORDER BY round, pos").bind(season).all(),
+    env.DB.prepare("SELECT round, player_id, pos, fav_pos, pole_driver, sprint_pos FROM picks WHERE season = ?1").bind(season).all(),
   ]);
 
   const players = (playersQ.results || []).map((p) => ({
@@ -421,13 +566,18 @@ async function buildState(env, season, meId) {
   /* Only drivers who are actually racing go in the draw. */
   const pool = drivers.filter((d) => d.active).map((d) => d.id);
 
-  const resultByRound = {}, poleByRound = {};
+  const resultByRound = {}, poleByRound = {}, qualiByRound = {}, sprintByRound = {};
   for (const r of resultsQ.results || []) (resultByRound[r.round] ||= [])[r.pos - 1] = r.driver_id;
-  for (const q of qualiQ.results || []) if (q.pos === 1) poleByRound[q.round] = q.driver_id;
+  for (const q of qualiQ.results || []) {
+    (qualiByRound[q.round] ||= [])[q.pos - 1] = q.driver_id;
+    if (q.pos === 1) poleByRound[q.round] = q.driver_id;
+  }
+  for (const r of sprintQ.results || []) (sprintByRound[r.round] ||= [])[r.pos - 1] = r.driver_id;
 
   const pickByRound = {};
   for (const p of picksQ.results || []) {
-    (pickByRound[p.round] ||= {})[p.player_id] = { pos: p.pos, favPos: p.fav_pos, pole: p.pole_driver };
+    (pickByRound[p.round] ||= {})[p.player_id] =
+      { pos: p.pos, favPos: p.fav_pos, pole: p.pole_driver, sprintPos: p.sprint_pos };
   }
 
   const now = Date.now();
@@ -446,8 +596,12 @@ async function buildState(env, season, meId) {
     const voided = !!result && !!driverId && result.indexOf(driverId) === -1;
     return {
       round: r.round, gi: i, name: r.name, circuit: r.circuit, cc: r.cc,
-      start: r.start, qualiAt: r.quali_at,
-      driverId, locked, result, voided, pole: poleByRound[r.round] || null,
+      start: r.start, qualiAt: r.quali_at, sprintAt: r.sprint_at,
+      driverId, locked, result, voided,
+      pole: poleByRound[r.round] || null,
+      quali: qualiByRound[r.round] || null,
+      sprint: sprintByRound[r.round] || null,
+      sprintLocked: !!r.sprint_at && new Date(r.sprint_at).getTime() <= now,
       picks: locked ? raw : { count: Object.keys(raw).length, mine },
     };
   });
@@ -472,6 +626,12 @@ async function buildState(env, season, meId) {
         const favActual = r.result.indexOf(favOf[pid]) + 1;
         if (favActual) {
           a.pts += Math.round(scoreFor(pick.favPos, favActual, cfg.scoring) * (cfg.scoring.favScale / 100));
+        }
+      }
+      if (cfg.modes.sprint && pick.sprintPos && r.sprint && r.driverId) {
+        const sActual = r.sprint.indexOf(r.driverId) + 1;
+        if (sActual) {
+          a.pts += Math.round(scoreFor(pick.sprintPos, sActual, cfg.scoring) * (cfg.scoring.sprintScale / 100));
         }
       }
       if (cfg.modes.pole && pick.pole && r.pole) {
@@ -557,14 +717,14 @@ async function handleApi(request, env, url, ctx) {
     const me = await requireMe();
     if (!me) return bad("Sign in first.", 401);
     const round = Number(body.round);
-    const r = await env.DB.prepare("SELECT start, quali_at FROM rounds WHERE season = ?1 AND round = ?2")
+    const r = await env.DB.prepare("SELECT start, quali_at, sprint_at FROM rounds WHERE season = ?1 AND round = ?2")
       .bind(season, round).first();
     if (!r) return bad("No such round.", 404);
     /* The real lock. The app hides the grid too, but this is what enforces it. */
     if (new Date(r.start).getTime() <= Date.now()) return bad("That race has started. Calls are closed.", 409);
 
     const cfg = await getSettings(env);
-    const prev = await env.DB.prepare("SELECT pos, fav_pos, pole_driver FROM picks WHERE season=?1 AND round=?2 AND player_id=?3")
+    const prev = await env.DB.prepare("SELECT pos, fav_pos, pole_driver, sprint_pos FROM picks WHERE season=?1 AND round=?2 AND player_id=?3")
       .bind(season, round, me.id).first();
 
     const num = (v, fallback) => (v === undefined ? fallback : v === null ? null : Number(v) || null);
@@ -572,6 +732,11 @@ async function handleApi(request, env, url, ctx) {
     const favPos = cfg.modes.favourite ? num(body.favPos, prev?.fav_pos ?? null) : null;
     let pole = cfg.modes.pole ? (body.pole === undefined ? prev?.pole_driver ?? null : body.pole || null) : null;
 
+    const sprintPos = cfg.modes.sprint ? num(body.sprintPos, prev?.sprint_pos ?? null) : null;
+    if (sprintPos !== null && r.sprint_at && new Date(r.sprint_at).getTime() <= Date.now()
+        && sprintPos !== (prev?.sprint_pos ?? null)) {
+      return bad("The sprint has started. Sprint calls are closed.", 409);
+    }
     if (pos !== null && (pos < 1 || pos > 30)) return bad("That isn't a valid call.");
     if (favPos !== null && (favPos < 1 || favPos > 30)) return bad("That isn't a valid call.");
     /* Pole closes when qualifying starts, not when the race does. */
@@ -580,11 +745,11 @@ async function handleApi(request, env, url, ctx) {
     }
 
     await env.DB.prepare(
-      `INSERT INTO picks (season, round, player_id, pos, fav_pos, pole_driver, at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+      `INSERT INTO picks (season, round, player_id, pos, fav_pos, pole_driver, sprint_pos, at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
        ON CONFLICT(season, round, player_id)
-       DO UPDATE SET pos = ?4, fav_pos = ?5, pole_driver = ?6, at = ?7`
-    ).bind(season, round, me.id, pos, favPos, pole, Date.now()).run();
+       DO UPDATE SET pos = ?4, fav_pos = ?5, pole_driver = ?6, sprint_pos = ?7, at = ?8`
+    ).bind(season, round, me.id, pos, favPos, pole, sprintPos, Date.now()).run();
     return json(await buildState(env, season, me.id));
   }
 
@@ -613,6 +778,42 @@ async function handleApi(request, env, url, ctx) {
       await env.DB.prepare("UPDATE players SET pw_hash = ?1, pw_salt = ?2 WHERE id = ?3").bind(hash, salt, me.id).run();
     }
     return json(await buildState(env, season, me.id));
+  }
+
+  /* --- notifications --- */
+
+  if (path === "/push/key" && method === "GET") {
+    return json({ key: env.VAPID_PUBLIC_KEY || null });
+  }
+
+  if (path === "/push/subscribe" && method === "POST") {
+    const me = await requireMe();
+    if (!me) return bad("Sign in first.", 401);
+    const sub = body.subscription;
+    if (!sub || !sub.endpoint) return bad("No subscription given.");
+    await env.DB.prepare(
+      `INSERT INTO push_subs (endpoint, player_id, p256dh, auth, created)
+       VALUES (?1, ?2, ?3, ?4, ?5)
+       ON CONFLICT(endpoint) DO UPDATE SET player_id = ?2, p256dh = ?3, auth = ?4`
+    ).bind(sub.endpoint, me.id, sub.keys?.p256dh || null, sub.keys?.auth || null, Date.now()).run();
+    return json({ ok: true });
+  }
+
+  if (path === "/push/unsubscribe" && method === "POST") {
+    if (body.endpoint) await env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ?1").bind(body.endpoint).run();
+    return json({ ok: true });
+  }
+
+  /* The service worker asks what to show, because the push itself has no payload. */
+  if (path === "/push/pending" && method === "GET") {
+    return json(await pendingNotice(env, season, meId));
+  }
+
+  if (path === "/push/test" && method === "POST") {
+    const me = await requireMe();
+    if (!me) return bad("Sign in first.", 401);
+    const sent = await pushTo(env, [me.id]);
+    return json({ ok: true, sent });
   }
 
   /* --- organiser only --- */
@@ -719,12 +920,13 @@ export default {
     return env.ASSETS.fetch(request);
   },
 
-  /* Four-hourly: refresh the calendar and pull in any finished race.
-     Nobody has to remember to press a button. */
+  /* Hourly: pull anything new, then send whatever notifications are due.
+     Everything already present is skipped, so a quiet hour costs one request. */
   async scheduled(event, env, ctx) {
     const season = Number(env.SEASON) || new Date().getUTCFullYear();
-    ctx.waitUntil(
-      syncAll(env, season).catch((e) => console.error("scheduled sync failed", e))
-    );
+    ctx.waitUntil((async () => {
+      try { await syncAll(env, season); } catch (e) { console.error("sync failed", e); }
+      try { await runNotifications(env, season); } catch (e) { console.error("notify failed", e); }
+    })());
   },
 };

@@ -8,7 +8,8 @@
     "preview": "wrangler dev",
     "deploy": "npm run build && wrangler deploy",
     "db:init": "wrangler d1 execute grid-call --remote --file=./schema.sql",
-    "db:init:local": "wrangler d1 execute grid-call --local --file=./schema.sql"
+    "db:init:local": "wrangler d1 execute grid-call --local --file=./schema.sql",
+    "push:keys": "node scripts/vapid.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

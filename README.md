@@ -85,6 +85,32 @@ npm run dev                      # app on :5173, proxies /api to :8787
   photos come from Wikimedia where they're freely licensed. Only the image URL
   is stored, never the image, and the Wikipedia page is kept for credit.
 
+## Notifications
+
+Real web push, not email and not a chat bot. Generate the keypair once:
+
+```bash
+npm run push:keys
+```
+
+It prints three things: put `VAPID_PUBLIC_KEY` in `wrangler.toml` under `[vars]`,
+then `npx wrangler secret put VAPID_PRIVATE_JWK` and `npx wrangler secret put
+VAPID_SUBJECT` (a `mailto:` address, which the push services require). Deploy,
+and a **Turn notifications on** button appears on everyone's profile page.
+
+Two nudges go out, both from the hourly cron: three hours before calls close if
+yours isn't in, and once when a result lands. Each is sent at most once.
+
+**On iPhone this only works from the Home Screen.** Apple does not allow web push
+in ordinary Safari tabs, so each person has to tap share, choose *Add to Home
+Screen*, and open Grid Call from the icon. The app detects this and shows the
+instructions instead of a button that would not work. Android and desktop have no
+such restriction.
+
+The push itself carries no payload — it just wakes the service worker, which then
+asks the server what to say. That avoids implementing RFC 8291 payload encryption
+and means notification text is never stored on a push provider's servers.
+
 ## Optional rounds
 
 Both are off by default. Settings has a switch for each, and turning one on or
@@ -96,6 +122,9 @@ off re-scores the whole season to match.
 - **Pole position.** Name who takes pole. 15 points for the pole-sitter, 5 if
   your pick qualifies second. This one closes when qualifying starts rather
   than when the race does, and the server enforces that separately.
+- **Sprint races.** On sprint weekends, also call where the drawn driver
+  finishes the sprint. Worth 40% of the main curve by default. Closes when the
+  sprint starts, again enforced separately from the race lock.
 
 Jolpica is run by volunteers and rate-limited. Four-hourly polling is well
 inside their limits. They ask callers to identify themselves with a custom
@@ -130,8 +159,11 @@ lower it; on a paid plan you can raise it.
 ## Layout
 
 ```
-src/worker.js   API, auth, Jolpica sync, cron. All the rules live here.
+src/worker.js   API, auth, Jolpica sync, push, cron. All the rules live here.
 src/App.jsx     The whole front end, one file.
+public/sw.js    Service worker. Shows notifications.
+public/         PWA manifest and icons.
+scripts/        One-off VAPID key generation.
 schema.sql      D1 tables. Run once. Re-running DROPs and recreates.
 wrangler.toml   Bindings, cron schedule, non-secret vars.
 ```

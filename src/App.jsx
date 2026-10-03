@@ -5,6 +5,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from "react"
 
 const CSS = `
 
+html, body, #root { margin: 0; padding: 0; background: #05080E; min-height: 100%; }
 .gc * { box-sizing: border-box; margin: 0; padding: 0; }
 .gc {
   --ink: #05080E;
@@ -23,6 +24,7 @@ const CSS = `
   color: var(--text);
   font-family: var(--font-b);
   min-height: 100vh;
+  min-height: 100dvh;   /* 100vh is wrong under mobile Safari's toolbars */
   font-size: 15px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
@@ -368,7 +370,38 @@ function Empty({ line, action }) {
 
 /* ===================== screens ===================== */
 
-function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, modes, onPick, now, onOpenRound, onNeedProfile, onNeedFavourite }) {
+function Recap({ round, drivers, players, standings, scoring, me, onOpen }) {
+  if (!round || !round.result) return null;
+  const d = round.driver;
+  const actual = d ? round.result.order.indexOf(d.id) + 1 : 0;
+  const mine = me && round.pickMap[me.id];
+  const best = Object.entries(round.pickMap)
+    .filter(([, p]) => p.pos)
+    .map(([pid, p]) => [pid, scoreFor(p.pos, actual, scoring)])
+    .sort((a, b) => b[1] - a[1])[0];
+  const winner = best && players[best[0]];
+  return (
+    <button className="panel pad" style={{ width: "100%", textAlign: "left", borderTop: "none" }} onClick={() => onOpen(round.round)}>
+      <div className="spread" style={{ alignItems: "flex-start" }}>
+        <div className="stack" style={{ minWidth: 0 }}>
+          <div className="tiny">Last round · {round.flag} {round.name}</div>
+          <div className="disp" style={{ fontSize: 21, marginTop: 3 }}>
+            {round.voided ? "Void — " + (d ? d.last : "driver") + " didn't start"
+              : (d ? d.last : "") + " finished " + ordinal(actual)}
+          </div>
+          {!round.voided && winner && (
+            <div className="meta" style={{ marginTop: 3 }}>
+              {winner.name} took the round with {best[1]}{mine && mine.pos ? " · you scored " + scoreFor(mine.pos, actual, scoring) : ""}
+            </div>
+          )}
+        </div>
+        {d && d.photo && <img className="mug" style={{ width: 42, height: 42 }} src={d.photo} alt="" />}
+      </div>
+    </button>
+  );
+}
+
+function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, modes, recap, onPick, now, onOpenRound, onNeedProfile, onNeedFavourite }) {
   const [draft, setDraft] = useState({});
   const [saving, setSaving] = useState(false);
   const rn = round ? round.round : 0;
@@ -392,6 +425,7 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, mod
     await onPick(round.round, {
       pos: val("pos") ?? null,
       favPos: modes.favourite ? val("favPos") ?? null : undefined,
+      sprintPos: modes.sprint ? val("sprintPos") ?? null : undefined,
       pole: modes.pole ? val("pole") ?? null : undefined,
     });
     setSaving(false);
@@ -400,6 +434,7 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, mod
 
   return (
     <div className="fade">
+      {recap}
       <div className="panel pad" style={{ borderTop: "none" }}>
         <div className="meta">Round {round.round} · Game race {round.gi + 1}</div>
         <h1 style={{ marginTop: 4 }}>{round.flag} {round.name}</h1>
@@ -489,6 +524,19 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, mod
             <button className="btn ghost" onClick={onNeedFavourite}>Choose your favourite</button>
           </div>
         ))}
+
+        {modes.sprint && round.sprintAt && (
+          <>
+            <h3 style={{ margin: "26px 0 4px" }}>And in the sprint?</h3>
+            <div className="meta" style={{ marginBottom: 14 }}>
+              {round.sprintLocked
+                ? "The sprint has run, so this is locked in."
+                : "Sprint weekend. Closes when the sprint starts, " + fmtDate(round.sprintAt) + "."}
+            </div>
+            <PositionGrid max={drivers.length} value={val("sprintPos")} disabled={round.sprintLocked}
+              onChange={(v) => setDraft({ ...draft, sprintPos: v })} />
+          </>
+        )}
 
         {modes.pole && (
           <>
@@ -605,6 +653,35 @@ function SeasonScreen({ rounds, me, picks, scoring, onOpenRound, now }) {
   );
 }
 
+function Classification({ title, order, drivers, highlight, limit = 10 }) {
+  if (!order || !order.length) return null;
+  return (
+    <>
+      <h3 style={{ margin: "26px 0 8px" }}>{title}</h3>
+      <div style={{ marginLeft: -16, marginRight: -16 }}>
+        {order.slice(0, limit).map((did, i) => {
+          const d = drivers.find((x) => x.id === did);
+          if (!d) return null;
+          const t = TEAMS[d.team] || {};
+          const on = did === highlight;
+          return (
+            <div key={did} className="trow" style={{ background: on ? "var(--raise)" : undefined }}>
+              <div className="tp" style={{ color: on ? t.color : undefined }}>{i + 1}</div>
+              <div className="row" style={{ minWidth: 0 }}>
+                <div style={{ width: 3, height: 20, background: t.color, borderRadius: 2, flex: "none" }} />
+                {d.photo && <img className="mug" src={d.photo} alt="" loading="lazy" />}
+                <div style={{ fontWeight: on ? 600 : 400 }}>{d.last}</div>
+              </div>
+              <div className="tiny">{t.name}</div>
+            </div>
+          );
+        })}
+      </div>
+      {order.length > limit && <div className="tiny" style={{ marginTop: 6 }}>Top {limit} shown.</div>}
+    </>
+  );
+}
+
 function RoundSheet({ round, drivers, players, picks, scoring, me, onClose }) {
   if (!round) return null;
   const order = round.result ? round.result.order : null;
@@ -651,6 +728,9 @@ function RoundSheet({ round, drivers, players, picks, scoring, me, onClose }) {
                 </div>
               );
             })}
+          <Classification title="Qualifying" order={round.quali} drivers={drivers} highlight={round.driver.id} />
+          <Classification title="Sprint" order={round.sprint} drivers={drivers} highlight={round.driver.id} />
+
           <h3 style={{ margin: "26px 0 8px" }}>Final classification</h3>
           <div style={{ marginLeft: -16, marginRight: -16 }}>
             {order.map((did, i) => {
@@ -718,6 +798,112 @@ async function api(path, options = {}) {
   try { data = await res.json(); } catch { /* empty body */ }
   if (!res.ok) throw new Error((data && data.error) || "Request failed (" + res.status + ")");
   return data;
+}
+
+/* ===================== notifications ===================== */
+
+const isStandalone = () =>
+  window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+
+function urlB64ToUint8Array(base64) {
+  const padded = (base64 + "=".repeat((4 - (base64.length % 4)) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+  return Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
+}
+
+async function enablePush() {
+  if (!pushSupported()) throw new Error("This browser can't do notifications.");
+  const reg = await navigator.serviceWorker.register("/sw.js");
+  await navigator.serviceWorker.ready;
+  const permission = await Notification.requestPermission();
+  if (permission !== "granted") throw new Error("Notifications were blocked. Turn them back on in your browser settings.");
+  const { key } = await api("/push/key");
+  if (!key) throw new Error("Push isn't configured on the server yet. The organiser needs to set the VAPID keys.");
+  const existing = await reg.pushManager.getSubscription();
+  const sub = existing || (await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlB64ToUint8Array(key),
+  }));
+  await api("/push/subscribe", { method: "POST", body: { subscription: sub.toJSON() } });
+  return true;
+}
+
+async function disablePush() {
+  const reg = await navigator.serviceWorker.getRegistration();
+  const sub = reg && (await reg.pushManager.getSubscription());
+  if (sub) {
+    await api("/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } });
+    await sub.unsubscribe();
+  }
+}
+
+function NotificationSettings() {
+  const [state, setState] = useState("checking");
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      if (!pushSupported()) return setState(isIOS() && !isStandalone() ? "ios-install" : "unsupported");
+      if (Notification.permission === "denied") return setState("blocked");
+      const reg = await navigator.serviceWorker.getRegistration();
+      const sub = reg && (await reg.pushManager.getSubscription());
+      setState(sub ? "on" : "off");
+    })();
+  }, []);
+
+  if (state === "checking") return null;
+
+  if (state === "ios-install") {
+    return (
+      <div style={{ marginTop: 22 }}>
+        <h3 style={{ marginBottom: 6 }}>Notifications</h3>
+        <div className="meta">
+          On iPhone, Apple only allows notifications once the app is on your Home Screen.
+          Tap the share button in Safari, choose <b>Add to Home Screen</b>, then open Grid Call
+          from there and come back to this page.
+        </div>
+      </div>
+    );
+  }
+  if (state === "unsupported" || state === "blocked") {
+    return (
+      <div style={{ marginTop: 22 }}>
+        <h3 style={{ marginBottom: 6 }}>Notifications</h3>
+        <div className="meta">
+          {state === "blocked"
+            ? "You've blocked notifications for this site. Re-allow them in your browser settings to turn them on."
+            : "This browser doesn't support notifications."}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 22 }}>
+      <h3 style={{ marginBottom: 6 }}>Notifications</h3>
+      <div className="meta" style={{ marginBottom: 12 }}>
+        A nudge three hours before calls close if yours isn't in, and one when a result lands.
+      </div>
+      {err && <div className="meta" style={{ color: "var(--stop)", marginBottom: 10 }}>{err}</div>}
+      {state === "on" ? (
+        <>
+          <button className="btn ghost" onClick={async () => { await disablePush(); setState("off"); }}>
+            Turn notifications off
+          </button>
+          <button className="btn ghost" style={{ marginTop: 10 }}
+            onClick={() => api("/push/test", { method: "POST" }).catch(() => {})}>
+            Send me a test
+          </button>
+        </>
+      ) : (
+        <button className="btn" onClick={async () => {
+          setErr("");
+          try { await enablePush(); setState("on"); } catch (e) { setErr(e.message); }
+        }}>Turn notifications on</button>
+      )}
+    </div>
+  );
 }
 
 /* ===================== joining, signing in, your profile ===================== */
@@ -875,6 +1061,7 @@ function ProfileScreen({ state, onState, onSignedOut }) {
         {done && <div className="meta" style={{ color: "var(--go)", marginBottom: 12 }}>{done}</div>}
         <button className="btn" disabled={busy} onClick={saveProfile}>{busy ? "Saving" : "Save changes"}</button>
         <button className="btn ghost" style={{ marginTop: 10 }} onClick={signOut}>Sign out</button>
+        <NotificationSettings />
       </div>
     </div>
   );
@@ -896,6 +1083,7 @@ const SCORE_FIELDS = [
 const MODE_SCORE_FIELDS = {
   favourite: [["favScale", "Favourite driver — percentage of the main points"]],
   pole: [["poleExact", "Named the pole-sitter"], ["poleFrontRow", "Your pole pick qualified second"]],
+  sprint: [["sprintScale", "Sprint call — percentage of the main points"]],
 };
 
 function Toggle({ label, hint, on, onChange }) {
@@ -1017,7 +1205,8 @@ function AdminScreen({ state, onState }) {
             {sync.ok === false
               ? "Last sync failed: " + sync.error
               : "Last sync: " + (sync.schedule || 0) + " rounds, " + (sync.drivers || 0) + " drivers, "
-                + (sync.races || 0) + " results, " + (sync.qualis || 0) + " qualifyings, " + (sync.photos || 0) + " portraits."}
+                + (sync.races || 0) + " results, " + (sync.qualis || 0) + " qualifyings, "
+                + (sync.sprints || 0) + " sprints, " + (sync.photos || 0) + " portraits."}
           </div>
         )}
       </div>
@@ -1028,6 +1217,9 @@ function AdminScreen({ state, onState }) {
         <Toggle label="Favourite driver" on={!!modes.favourite}
           hint="Everyone also calls where their own favourite finishes, for fewer points"
           onChange={(v) => run("modes", async () => onState(await api("/admin/settings", { method: "POST", body: { modes: { favourite: v } } })))} />
+        <Toggle label="Sprint races" on={!!modes.sprint}
+          hint="On sprint weekends, also call the drawn driver's sprint finish"
+          onChange={(v) => run("modes", async () => onState(await api("/admin/settings", { method: "POST", body: { modes: { sprint: v } } })))} />
         <Toggle label="Pole position" on={!!modes.pole}
           hint="Name who takes pole. Closes when qualifying starts, not the race"
           onChange={(v) => run("modes", async () => onState(await api("/admin/settings", { method: "POST", body: { modes: { pole: v } } })))} />
@@ -1181,6 +1373,10 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }, []);
+
   /* Quiet refresh so everyone sees calls and results land. */
   useEffect(() => {
     if (phase !== "ready") return;
@@ -1214,6 +1410,7 @@ export default function App() {
   }, [rounds]);
 
   const activeRound = useMemo(() => rounds.find((r) => !r.result) || null, [rounds]);
+  const lastDone = useMemo(() => [...rounds].reverse().find((r) => r.result) || null, [rounds]);
 
   const savePick = useCallback(async (round, calls) => {
     try { setSt(await api("/pick", { method: "POST", body: { round, ...calls } })); return true; }
@@ -1256,6 +1453,10 @@ export default function App() {
           callCount={activeRound ? activeRound.callCount : 0}
           myPick={activeRound ? activeRound.myPick : null}
           modes={st.modes || {}}
+          recap={lastDone && (
+            <Recap round={lastDone} drivers={st.drivers} players={playersById}
+              standings={st.standings} scoring={st.scoring} me={st.me} onOpen={setOpenRound} />
+          )}
           onPick={savePick} now={now}
           onOpenRound={setOpenRound} onNeedProfile={() => setTab("you")}
           onNeedFavourite={() => setTab("you")}

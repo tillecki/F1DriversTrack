@@ -2,6 +2,8 @@
 -- Run once:  npm run db:init
 -- This DROPs and recreates. Re-running wipes players, calls and results.
 
+DROP TABLE IF EXISTS push_subs;
+DROP TABLE IF EXISTS sprint;
 DROP TABLE IF EXISTS picks;
 DROP TABLE IF EXISTS results;
 DROP TABLE IF EXISTS quali;
@@ -30,7 +32,8 @@ CREATE TABLE rounds (
   circuit  TEXT,
   cc       TEXT,
   start    TEXT NOT NULL,               -- ISO 8601 UTC, lights out
-  quali_at TEXT,                        -- ISO 8601 UTC, start of qualifying
+  quali_at  TEXT,                       -- ISO 8601 UTC, start of qualifying
+  sprint_at TEXT,                       -- ISO 8601 UTC, start of the sprint (sprint weekends only)
   PRIMARY KEY (season, round)
 );
 
@@ -56,6 +59,14 @@ CREATE TABLE results (
   PRIMARY KEY (season, round, pos)
 );
 
+CREATE TABLE sprint (
+  season    INTEGER NOT NULL,
+  round     INTEGER NOT NULL,
+  pos       INTEGER NOT NULL,
+  driver_id TEXT NOT NULL,
+  PRIMARY KEY (season, round, pos)
+);
+
 CREATE TABLE quali (
   season    INTEGER NOT NULL,
   round     INTEGER NOT NULL,
@@ -71,8 +82,18 @@ CREATE TABLE picks (
   pos         INTEGER,                  -- the drawn driver's finishing position
   fav_pos     INTEGER,                  -- your favourite driver's finishing position
   pole_driver TEXT,                     -- who takes pole
+  sprint_pos  INTEGER,                  -- the drawn driver's sprint finish
   at          INTEGER NOT NULL,
   PRIMARY KEY (season, round, player_id)
+);
+
+-- One row per browser that has allowed notifications.
+CREATE TABLE push_subs (
+  endpoint  TEXT PRIMARY KEY,
+  player_id TEXT NOT NULL,
+  p256dh    TEXT,
+  auth      TEXT,
+  created   INTEGER NOT NULL
 );
 
 CREATE TABLE settings (
@@ -83,11 +104,14 @@ CREATE TABLE settings (
 CREATE INDEX idx_picks_round   ON picks   (season, round);
 CREATE INDEX idx_results_round ON results (season, round);
 CREATE INDEX idx_quali_round   ON quali   (season, round);
+CREATE INDEX idx_sprint_round  ON sprint  (season, round);
+CREATE INDEX idx_push_player  ON push_subs (player_id);
 CREATE INDEX idx_drivers_season ON drivers (season);
 
 INSERT INTO settings (k, v) VALUES
-  ('scoring', '{"exact":25,"off1":18,"off2":12,"off3":8,"off45":4,"off6":0,"podium":5,"points":3,"favScale":50,"poleExact":15,"poleFrontRow":5}'),
-  ('modes', '{"favourite":false,"pole":false}'),
+  ('scoring', '{"exact":25,"off1":18,"off2":12,"off3":8,"off45":4,"off6":0,"podium":5,"points":3,"favScale":50,"poleExact":15,"poleFrontRow":5,"sprintScale":40}'),
+  ('modes', '{"favourite":false,"pole":false,"sprint":false}'),
   ('seed', '0'),
   ('startRound', '0'),
-  ('syncState', '{}');
+  ('syncState', '{}'),
+  ('notified', '{}');
