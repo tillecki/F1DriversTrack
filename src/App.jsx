@@ -124,6 +124,16 @@ const CSS = `
 .gc .dcard { display: flex; align-items: stretch; background: var(--raise); border-radius: 3px; overflow: hidden; }
 .gc .dcard .bar { width: 6px; flex: none; }
 .gc .dcard .body { padding: 14px 16px; flex: 1; }
+.gc .dcard .face { width: 68px; flex: none; background: #0A1017; object-fit: cover; object-position: top center; }
+.gc .mug { width: 26px; height: 26px; border-radius: 3px; object-fit: cover; object-position: top center; background: #0A1017; flex: none; }
+.gc .picker { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
+.gc .pick1 { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--raise); border-radius: 3px; border: 1px solid transparent; text-align: left; font-size: 13px; }
+.gc .pick1.on { border-color: var(--text); background: #1C2737; }
+.gc .toggle { display: flex; align-items: center; justify-content: space-between; padding: 13px 0; border-bottom: 1px solid var(--line); }
+.gc .sw { width: 46px; height: 27px; border-radius: 14px; background: var(--line); position: relative; flex: none; transition: background .15s ease; }
+.gc .sw.on { background: var(--go); }
+.gc .sw i { position: absolute; top: 3px; left: 3px; width: 21px; height: 21px; border-radius: 50%; background: #fff; transition: transform .15s ease; }
+.gc .sw.on i { transform: translateX(19px); }
 
 /* ---- tabs ---- */
 .gc .tabs {
@@ -303,6 +313,7 @@ function DriverCard({ driver, sub }) {
   return (
     <div className="dcard">
       <div className="bar" style={{ background: t.color }} />
+      {driver.photo && <img className="face" src={driver.photo} alt="" loading="lazy" />}
       <div className="body spread">
         <div>
           <div className="disp" style={{ fontSize: 27 }}>{driver.first} {driver.last}</div>
@@ -357,11 +368,11 @@ function Empty({ line, action }) {
 
 /* ===================== screens ===================== */
 
-function RaceScreen({ round, drivers, me, players, picks, callCount, myPos, onPick, now, onOpenRound, onNeedProfile }) {
-  const [draft, setDraft] = useState(null);
+function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, modes, onPick, now, onOpenRound, onNeedProfile, onNeedFavourite }) {
+  const [draft, setDraft] = useState({});
   const [saving, setSaving] = useState(false);
   const rn = round ? round.round : 0;
-  useEffect(() => { setDraft(null); }, [rn]);
+  useEffect(() => { setDraft({}); }, [rn]);
 
   if (!round) return <Empty line="Every round has a result. That's the season done." />;
   if (!round.driver) return <Empty line="Waiting on the driver list. An organiser can press Sync now in Settings." />;
@@ -369,16 +380,22 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPos, onPi
   const team = TEAMS[round.driver.team] || { color: "#EAEFF6", name: "" };
   const cd = countdown(round.start, now);
   const soon = cd && new Date(round.start) - now < 36 * 3600 * 1000;
-  const myPick = myPos ? { pos: myPos } : null;
-  const shown = draft != null ? draft : (myPick ? myPick.pos : null);
   const callers = callCount || 0;
+  const fav = me && me.favourite ? drivers.find((d) => d.id === me.favourite) : null;
+  const qualiShut = round.qualiAt && new Date(round.qualiAt) <= now;
+
+  const val = (k) => (draft[k] !== undefined ? draft[k] : myPick ? myPick[k] : null);
+  const dirty = Object.keys(draft).some((k) => draft[k] !== (myPick ? myPick[k] : null));
 
   async function commit() {
-    if (!draft) return;
     setSaving(true);
-    await onPick(round.round, draft);
+    await onPick(round.round, {
+      pos: val("pos") ?? null,
+      favPos: modes.favourite ? val("favPos") ?? null : undefined,
+      pole: modes.pole ? val("pole") ?? null : undefined,
+    });
     setSaving(false);
-    setDraft(null);
+    setDraft({});
   }
 
   return (
@@ -405,11 +422,11 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPos, onPi
           Same driver for everyone. Every driver comes up once before any of them comes up again.
         </div>
       </div>
-      {renderCallBlock()}
+      {body()}
     </div>
   );
 
-  function renderCallBlock() {
+  function body() {
     if (!me) {
       return (
         <div className="panel pad">
@@ -426,14 +443,18 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPos, onPi
             <h3>The calls</h3>
             <div className="meta">{callers === 0 ? "Nobody called this one." : callers + (callers === 1 ? " call is" : " calls are") + " in."}</div>
           </div>
-          {Object.entries(picks).sort((a, b) => a[1].pos - b[1].pos).map(([pid, p]) => {
+          {Object.entries(picks).sort((a, b) => (a[1].pos || 99) - (b[1].pos || 99)).map(([pid, p]) => {
             const pl = players[pid];
             if (!pl) return null;
+            const poleDriver = p.pole ? drivers.find((d) => d.id === p.pole) : null;
             return (
               <div key={pid} className={"trow" + (me && pid === me.id ? " me" : "")}>
-                <div className="tp">{p.pos}</div>
-                <div className="row"><Avatar player={pl} /><div>{pl.name}</div></div>
-                <div className="meta">{ordinal(p.pos)}</div>
+                <div className="tp">{p.pos || "—"}</div>
+                <div className="row"><Avatar player={pl} /><div className="stack">
+                  <div>{pl.name}</div>
+                  {poleDriver && <div className="tiny">pole: {poleDriver.last}</div>}
+                </div></div>
+                <div className="meta">{p.pos ? ordinal(p.pos) : "no call"}</div>
               </div>
             );
           })}
@@ -449,12 +470,51 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPos, onPi
       <div className="panel pad">
         <h3 style={{ marginBottom: 4 }}>Where does {round.driver.last} finish?</h3>
         <div className="meta" style={{ marginBottom: 14 }}>
-          {myPick ? "You called " + ordinal(myPick.pos) + ". Change it any time before lights out." : "Pick a finishing position."}
+          {myPick && myPick.pos ? "You called " + ordinal(myPick.pos) + "." : "Pick a finishing position."}
         </div>
-        <PositionGrid max={drivers.length} value={shown} onChange={setDraft} />
-        <div style={{ marginTop: 16 }}>
-          <button className="btn" disabled={!draft || saving || (myPick && draft === myPick.pos)} onClick={commit}>
-            {saving ? "Saving" : !draft ? "Pick a position" : myPick ? "Change to " + ordinal(draft) : "Lock in " + ordinal(draft)}
+        <PositionGrid max={drivers.length} value={val("pos")} onChange={(v) => setDraft({ ...draft, pos: v })} />
+
+        {modes.favourite && (fav ? (
+          <>
+            <h3 style={{ margin: "26px 0 4px" }}>And where does {fav.last} finish?</h3>
+            <div className="meta" style={{ marginBottom: 14 }}>
+              Your favourite driver. Worth less than the main call.
+            </div>
+            <PositionGrid max={drivers.length} value={val("favPos")} onChange={(v) => setDraft({ ...draft, favPos: v })} />
+          </>
+        ) : (
+          <div style={{ marginTop: 22 }}>
+            <h3 style={{ marginBottom: 6 }}>Favourite driver round</h3>
+            <div className="meta" style={{ marginBottom: 12 }}>Choose a favourite driver to call this one too.</div>
+            <button className="btn ghost" onClick={onNeedFavourite}>Choose your favourite</button>
+          </div>
+        ))}
+
+        {modes.pole && (
+          <>
+            <h3 style={{ margin: "26px 0 4px" }}>Who takes pole?</h3>
+            <div className="meta" style={{ marginBottom: 12 }}>
+              {qualiShut ? "Qualifying has started, so this is locked in." : "Closes when qualifying starts."}
+            </div>
+            <div className="picker">
+              {drivers.map((d) => {
+                const t = TEAMS[d.team] || {};
+                return (
+                  <button key={d.id} disabled={qualiShut}
+                    className={"pick1" + (val("pole") === d.id ? " on" : "")}
+                    onClick={() => setDraft({ ...draft, pole: d.id })}>
+                    <span style={{ width: 3, height: 18, background: t.color, borderRadius: 2, flex: "none" }} />
+                    {d.last}
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        <div style={{ marginTop: 18 }}>
+          <button className="btn" disabled={!dirty || saving} onClick={commit}>
+            {saving ? "Saving" : dirty ? "Lock in your calls" : myPick ? "Calls saved" : "Make a call"}
           </button>
         </div>
         <div className="tiny" style={{ marginTop: 12, textAlign: "center" }}>
@@ -509,16 +569,18 @@ function SeasonScreen({ rounds, me, picks, scoring, onOpenRound, now }) {
       </div>
       <div className="panel">
         {rounds.map((r) => {
-          const mine = picks[r.round] ? { pos: picks[r.round] } : null;
-          const team = TEAMS[r.driver.team] || {};
+          const mine = picks[r.round] || null;
+          const team = (r.driver && TEAMS[r.driver.team]) || {};
           let right;
-          if (r.result) {
+          if (r.voided) {
+            right = <span className="chip" style={{ color: "var(--caution)" }}>Void</span>;
+          } else if (r.result) {
             const actual = r.result.order.indexOf(r.driver.id) + 1;
-            const pts = mine && actual ? scoreFor(mine.pos, actual, scoring) : 0;
+            const pts = mine && mine.pos && actual ? scoreFor(mine.pos, actual, scoring) : 0;
             right = (
               <div style={{ textAlign: "right" }}>
                 <div className="num" style={{ fontSize: 20 }}>{actual ? "P" + actual : "—"}</div>
-                <div className="tiny">{mine ? "+" + pts : "no call"}</div>
+                <div className="tiny">{mine && mine.pos ? "+" + pts : "no call"}</div>
               </div>
             );
           } else if (r.locked) {
@@ -532,7 +594,7 @@ function SeasonScreen({ rounds, me, picks, scoring, onOpenRound, now }) {
               <div className="tp" style={{ color: team.color }}>{r.gi + 1}</div>
               <div className="stack" style={{ minWidth: 0 }}>
                 <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.flag} {r.name}</div>
-                <div className="tiny">{r.driver.last} · {team.name}</div>
+                <div className="tiny">{r.driver ? r.driver.last + " · " + team.name : "driver not drawn"}</div>
               </div>
               {right}
             </button>
@@ -549,13 +611,18 @@ function RoundSheet({ round, drivers, players, picks, scoring, me, onClose }) {
   const actual = order ? order.indexOf(round.driver.id) + 1 : null;
   const team = TEAMS[round.driver.team] || {};
   const byPos = {};
-  Object.entries(picks || {}).forEach(([pid, p]) => { (byPos[p.pos] = byPos[p.pos] || []).push(pid); });
+  Object.entries(picks || {}).forEach(([pid, p]) => { if (p.pos) (byPos[p.pos] = byPos[p.pos] || []).push(pid); });
   const entries = Object.entries(picks || {});
 
   return (
     <Sheet title={round.flag + " " + round.name} onClose={onClose}>
       <DriverCard driver={round.driver} sub={actual ? "finished " + ordinal(actual) : "result pending"} />
-      {!order ? (
+      {round.voided ? (
+        <div className="meta" style={{ marginTop: 18 }}>
+          {round.driver.last} didn't take the start, so this round scores nothing for anyone.
+          An organiser can redraw it in Settings.
+        </div>
+      ) : !order ? (
         <div className="meta" style={{ marginTop: 18 }}>
           No result yet. An organiser can pull it in from Settings once the race has finished.
         </div>
@@ -564,7 +631,7 @@ function RoundSheet({ round, drivers, players, picks, scoring, me, onClose }) {
           <h3 style={{ margin: "22px 0 4px" }}>How everyone called it</h3>
           <div className="meta" style={{ marginBottom: 6 }}>{round.driver.last} finished {ordinal(actual)}.</div>
           {entries.length === 0 && <div className="meta">Nobody called this round.</div>}
-          {entries.map(([pid, p]) => [pid, p, scoreFor(p.pos, actual, scoring)])
+          {entries.filter(([, p]) => p.pos).map(([pid, p]) => [pid, p, scoreFor(p.pos, actual, scoring)])
             .sort((a, b) => b[2] - a[2])
             .map(([pid, p, pts]) => {
               const pl = players[pid];
@@ -597,6 +664,7 @@ function RoundSheet({ round, drivers, players, picks, scoring, me, onClose }) {
                   <div className="tp" style={{ color: isDrawn ? team.color : undefined }}>{i + 1}</div>
                   <div className="row" style={{ minWidth: 0 }}>
                     <div style={{ width: 3, height: 22, background: t.color, borderRadius: 2, flex: "none" }} />
+                    {d.photo && <img className="mug" src={d.photo} alt="" loading="lazy" />}
                     <div className="stack" style={{ minWidth: 0 }}>
                       <div style={{ fontWeight: isDrawn ? 600 : 400 }}>{d.last}</div>
                       <div className="tiny">{t.name}</div>
@@ -662,6 +730,7 @@ function ProfileScreen({ state, onState, onSignedOut }) {
   const [password, setPassword] = useState("");
   const [photo, setPhoto] = useState(me ? me.photo : null);
   const [color, setColor] = useState(me ? me.color : AVATAR_COLORS[0]);
+  const [favourite, setFavourite] = useState(me ? me.favourite || "" : "");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [done, setDone] = useState("");
@@ -689,7 +758,7 @@ function ProfileScreen({ state, onState, onSignedOut }) {
   });
 
   const saveProfile = () => run(async () => {
-    const patch = { name, photo, color };
+    const patch = { name, photo, color, favourite: favourite || null };
     if (password) patch.password = password;
     onState(await api("/me", { method: "PATCH", body: patch }));
     setPassword("");
@@ -788,6 +857,16 @@ function ProfileScreen({ state, onState, onSignedOut }) {
           <input type="text" value={name} maxLength={22} onChange={(e) => setName(e.target.value)} />
         </label>
         {colorPicker}
+        {state.modes && state.modes.favourite && (
+          <label className="fld"><span>Favourite driver</span>
+            <select value={favourite} onChange={(e) => setFavourite(e.target.value)}>
+              <option value="">Not chosen yet</option>
+              {state.drivers.filter((d) => d.active).map((d) => (
+                <option key={d.id} value={d.id}>{d.first} {d.last}</option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="fld"><span>New password</span>
           <input type="password" value={password} autoComplete="new-password"
             onChange={(e) => setPassword(e.target.value)} placeholder="Leave blank to keep the current one" />
@@ -814,9 +893,28 @@ const SCORE_FIELDS = [
   ["points", "Points bonus — called top ten, finished top ten"],
 ];
 
+const MODE_SCORE_FIELDS = {
+  favourite: [["favScale", "Favourite driver — percentage of the main points"]],
+  pole: [["poleExact", "Named the pole-sitter"], ["poleFrontRow", "Your pole pick qualified second"]],
+};
+
+function Toggle({ label, hint, on, onChange }) {
+  return (
+    <button className="toggle" style={{ width: "100%" }} onClick={() => onChange(!on)} aria-pressed={on}>
+      <div className="stack" style={{ textAlign: "left" }}>
+        <div>{label}</div>
+        <div className="tiny">{hint}</div>
+      </div>
+      <span className={"sw" + (on ? " on" : "")}><i /></span>
+    </button>
+  );
+}
+
 function AdminScreen({ state, onState }) {
   const me = state.me;
   const [scoring, setScoring] = useState(state.scoring);
+  const modes = state.modes || {};
+  const sync = state.syncState || {};
   const [startRound, setStartRound] = useState(state.startRound);
   const [elevateCode, setElevateCode] = useState("");
   const [busy, setBusy] = useState("");
@@ -874,11 +972,10 @@ function AdminScreen({ state, onState }) {
     setNote("Drivers redrawn.");
   });
 
-  const sync = () => run("sync", async () => {
-    const r = await api("/admin/sync", { method: "POST" });
-    onState(r.state);
-    const got = (r.report.results || []).filter((x) => x.positions).length;
-    setNote("Calendar: " + r.report.schedule + " rounds. Drivers: " + r.report.drivers + ". New results: " + got + ".");
+  /* Returns straight away; the worker keeps going and reports through syncState. */
+  const sync2 = () => run("sync", async () => {
+    onState(await api("/admin/sync", { method: "POST" }));
+    setNote("Fetching in the background. This page updates itself as it goes.");
   });
 
   const saveManual = () => run("manual", async () => {
@@ -909,18 +1006,66 @@ function AdminScreen({ state, onState }) {
       <div className="panel pad">
         <h3 style={{ marginBottom: 4 }}>Race data</h3>
         <div className="meta" style={{ marginBottom: 14 }}>
-          The calendar and finished results come from the Jolpica F1 API and refresh on their own every four hours.
-          This button does it now.
+          Calendar, results, qualifying and driver portraits come from the Jolpica F1 API and Wikipedia,
+          and refresh on their own every four hours. This runs it now, in the background.
         </div>
-        <button className="btn" disabled={busy === "sync"} onClick={sync}>
-          {busy === "sync" ? "Fetching" : "Sync now"}
+        <button className="btn" disabled={busy === "sync" || sync.busy} onClick={sync2}>
+          {sync.busy ? "Fetching · " + (sync.step || "working") : "Sync now"}
         </button>
+        {sync.at && !sync.busy && (
+          <div className="tiny" style={{ marginTop: 10 }}>
+            {sync.ok === false
+              ? "Last sync failed: " + sync.error
+              : "Last sync: " + (sync.schedule || 0) + " rounds, " + (sync.drivers || 0) + " drivers, "
+                + (sync.races || 0) + " results, " + (sync.qualis || 0) + " qualifyings, " + (sync.photos || 0) + " portraits."}
+          </div>
+        )}
+      </div>
+
+      <div className="pad">
+        <h3 style={{ marginBottom: 4 }}>Extra rounds</h3>
+        <div className="meta" style={{ marginBottom: 6 }}>Switch these on and off whenever. Past rounds re-score to match.</div>
+        <Toggle label="Favourite driver" on={!!modes.favourite}
+          hint="Everyone also calls where their own favourite finishes, for fewer points"
+          onChange={(v) => run("modes", async () => onState(await api("/admin/settings", { method: "POST", body: { modes: { favourite: v } } })))} />
+        <Toggle label="Pole position" on={!!modes.pole}
+          hint="Name who takes pole. Closes when qualifying starts, not the race"
+          onChange={(v) => run("modes", async () => onState(await api("/admin/settings", { method: "POST", body: { modes: { pole: v } } })))} />
+      </div>
+
+      <div className="panel pad">
+        <h3 style={{ marginBottom: 4 }}>The driver pool</h3>
+        <div className="meta" style={{ marginBottom: 10 }}>
+          {state.drivers.filter((d) => d.active).length} of {state.drivers.length} drivers are in the draw.
+          Worked out from who actually starts races — switch anyone in or out if it gets it wrong.
+        </div>
+        {state.drivers.map((d) => (
+          <div key={d.id} className="spread" style={{ padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
+            <div className="row" style={{ minWidth: 0 }}>
+              <span style={{ width: 3, height: 20, background: (TEAMS[d.team] || {}).color || "#4A5768", borderRadius: 2, flex: "none" }} />
+              {d.photo && <img className="mug" src={d.photo} alt="" loading="lazy" />}
+              <div className="stack" style={{ minWidth: 0 }}>
+                <div style={{ opacity: d.active ? 1 : 0.45 }}>{d.first} {d.last}</div>
+                <div className="tiny">{d.starts} {d.starts === 1 ? "start" : "starts"}</div>
+              </div>
+            </div>
+            <button className="btn ghost sm" onClick={() => run("drv", async () =>
+              onState(await api("/admin/driver", { method: "POST", body: { id: d.id, active: !d.active } })))}>
+              {d.active ? "In" : "Out"}
+            </button>
+          </div>
+        ))}
+        <div className="tiny" style={{ marginTop: 10 }}>
+          Portraits come from Wikipedia and stay there — only the link is stored.
+        </div>
       </div>
 
       <div className="pad">
         <h3 style={{ marginBottom: 4 }}>Points</h3>
         <div className="meta" style={{ marginBottom: 14 }}>Change these whenever. The season re-scores instantly.</div>
-        {SCORE_FIELDS.map(([k, label]) => (
+        {SCORE_FIELDS.concat(
+          Object.entries(MODE_SCORE_FIELDS).filter(([m]) => modes[m]).flatMap(([, f]) => f)
+        ).map(([k, label]) => (
           <label className="fld" key={k}><span>{label}</span>
             <input type="number" value={scoring[k]} onChange={(e) => setScoring({ ...scoring, [k]: Number(e.target.value) || 0 })} />
           </label>
@@ -1058,20 +1203,20 @@ export default function App() {
       result: r.result ? { order: r.result } : null,
       pickMap: locked ? Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, { pos: v }])) : {},
       callCount: locked ? Object.keys(raw).length : raw.count || 0,
-      myPos: locked ? (st.me ? raw[st.me.id] ?? null : null) : raw.mine ?? null,
+      myPick: locked ? (st.me ? raw[st.me.id] ?? null : null) : raw.mine ?? null,
     };
   }), [st, driverById]);
 
   const myPicks = useMemo(() => {
     const m = {};
-    rounds.forEach((r) => { if (r.myPos) m[r.round] = r.myPos; });
+    rounds.forEach((r) => { if (r.myPick) m[r.round] = r.myPick; });
     return m;
   }, [rounds]);
 
   const activeRound = useMemo(() => rounds.find((r) => !r.result) || null, [rounds]);
 
-  const savePick = useCallback(async (round, pos) => {
-    try { setSt(await api("/pick", { method: "POST", body: { round, pos } })); return true; }
+  const savePick = useCallback(async (round, calls) => {
+    try { setSt(await api("/pick", { method: "POST", body: { round, ...calls } })); return true; }
     catch (e) { alert(e.message); return false; }
   }, []);
 
@@ -1109,9 +1254,11 @@ export default function App() {
           round={activeRound} drivers={st.drivers} me={st.me} players={playersById}
           picks={activeRound ? activeRound.pickMap : {}}
           callCount={activeRound ? activeRound.callCount : 0}
-          myPos={activeRound ? activeRound.myPos : null}
+          myPick={activeRound ? activeRound.myPick : null}
+          modes={st.modes || {}}
           onPick={savePick} now={now}
           onOpenRound={setOpenRound} onNeedProfile={() => setTab("you")}
+          onNeedFavourite={() => setTab("you")}
         />
       ))}
 

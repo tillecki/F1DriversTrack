@@ -15,7 +15,7 @@ crons = ["0 */4 * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "grid-call"
-database_id = "PASTE_YOUR_DATABASE_ID_HERE"
+database_id = "c0e58132-769c-4775-a444-50bc07a193b8"
 
 [vars]
 SEASON = "2026"

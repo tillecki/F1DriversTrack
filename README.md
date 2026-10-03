@@ -73,9 +73,29 @@ npm run dev                      # app on :5173, proxies /api to :8787
   six or more 0. Plus 5 if you called a podium and got one, plus 3 for a points
   finish. All eight numbers are editable and the whole season re-scores the
   moment you save.
-- **Results.** A cron trigger runs every four hours, refreshes the calendar and
-  pulls the finishing order for any race that's been run. There's a manual
-  override in Settings if a result is wrong or late.
+- **The pool.** Only drivers who actually start races are in the draw. It's
+  worked out from race entry lists rather than the season roster, so reserves
+  and drivers who've left stay out. Settings has a manual in/out switch per
+  driver if a mid-season change confuses it.
+- **Results.** A cron trigger runs every four hours and refreshes the calendar,
+  results, qualifying and driver portraits. It runs in the background, so the
+  Sync now button returns straight away and the page reports progress as it
+  goes. There's a manual override in Settings if a result is wrong or late.
+- **Portraits.** Each driver record from Jolpica carries a Wikipedia link, so
+  photos come from Wikimedia where they're freely licensed. Only the image URL
+  is stored, never the image, and the Wikipedia page is kept for credit.
+
+## Optional rounds
+
+Both are off by default. Settings has a switch for each, and turning one on or
+off re-scores the whole season to match.
+
+- **Favourite driver.** Everyone nominates a favourite in their profile and
+  calls where that driver finishes as well. Scores a percentage of the main
+  curve, 50% by default, adjustable.
+- **Pole position.** Name who takes pole. 15 points for the pole-sitter, 5 if
+  your pick qualifies second. This one closes when qualifying starts rather
+  than when the race does, and the server enforces that separately.
 
 Jolpica is run by volunteers and rate-limited. Four-hourly polling is well
 inside their limits. They ask callers to identify themselves with a custom
@@ -112,6 +132,6 @@ lower it; on a paid plan you can raise it.
 ```
 src/worker.js   API, auth, Jolpica sync, cron. All the rules live here.
 src/App.jsx     The whole front end, one file.
-schema.sql      D1 tables. Run once.
+schema.sql      D1 tables. Run once. Re-running DROPs and recreates.
 wrangler.toml   Bindings, cron schedule, non-secret vars.
 ```

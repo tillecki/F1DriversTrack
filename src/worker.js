@@ -108,7 +108,14 @@ const CLEAR_COOKIE = "gc_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-A
 
 /* ---------- settings ---------- */
 
-const DEFAULT_SCORING = { exact: 25, off1: 18, off2: 12, off3: 8, off45: 4, off6: 0, podium: 5, points: 3 };
+const DEFAULT_SCORING = {
+  exact: 25, off1: 18, off2: 12, off3: 8, off45: 4, off6: 0, podium: 5, points: 3,
+  favScale: 50,      // your favourite driver scores this percentage of the main curve
+  poleExact: 15,     // named the pole-sitter
+  poleFrontRow: 5,   // your pick qualified second
+};
+
+const DEFAULT_MODES = { favourite: false, pole: false };
 
 async function getSettings(env) {
   const rows = await env.DB.prepare("SELECT k, v FROM settings").all();
@@ -118,6 +125,8 @@ async function getSettings(env) {
   }
   return {
     scoring: { ...DEFAULT_SCORING, ...(out.scoring || {}) },
+    modes: { ...DEFAULT_MODES, ...(out.modes || {}) },
+    syncState: out.syncState || {},
     seed: Number(out.seed) || 0,
     startRound: Number(out.startRound) || 0,
   };
@@ -131,16 +140,14 @@ async function putSetting(env, k, v) {
 /* ---------- Jolpica (the Ergast successor) ---------- */
 
 /* Jolpica asks every caller to identify itself with a custom User-Agent.
-   Browsers refuse to set that header, which is exactly why these calls
-   happen here in the Worker rather than in the app. */
+   Browsers refuse to set that header, which is why these calls live here.
+   Routes are lower-case and case-sensitive, and the default page size is 30,
+   so every call passes an explicit limit. */
 async function jolpica(env, path) {
   const res = await fetch("https://api.jolpi.ca/ergast/f1/" + path, {
-    headers: {
-      "User-Agent": env.USER_AGENT || "GridCall/1.0",
-      Accept: "application/json",
-    },
+    headers: { "User-Agent": env.USER_AGENT || "GridCall/1.0", Accept: "application/json" },
   });
-  if (!res.ok) throw new Error("Jolpica returned " + res.status);
+  if (!res.ok) throw new Error("Jolpica returned " + res.status + " for " + path);
   return res.json();
 }
 
@@ -151,101 +158,198 @@ const TEAM_ALIASES = {
   williams: "williams", mercedes: "mercedes", ferrari: "ferrari", mclaren: "mclaren",
 };
 
-function teamSlug(constructorId) {
-  const id = String(constructorId || "").toLowerCase();
-  return TEAM_ALIASES[id] || id;
-}
+const teamSlug = (id) => TEAM_ALIASES[String(id || "").toLowerCase()] || String(id || "").toLowerCase();
 
 async function syncSchedule(env, season) {
   const data = await jolpica(env, season + "/races/?limit=100");
   const races = data?.MRData?.RaceTable?.Races || [];
   if (!races.length) return 0;
-  const stmts = races.map((r) =>
+  await env.DB.batch(races.map((r) =>
     env.DB.prepare(
-      `INSERT INTO rounds (season, round, name, circuit, cc, start)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-       ON CONFLICT(season, round) DO UPDATE SET name=?3, circuit=?4, cc=?5, start=?6`
+      `INSERT INTO rounds (season, round, name, circuit, cc, start, quali_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+       ON CONFLICT(season, round) DO UPDATE SET name=?3, circuit=?4, cc=?5, start=?6, quali_at=?7`
     ).bind(
-      Number(season),
-      Number(r.round),
+      Number(season), Number(r.round),
       r.raceName || "Round " + r.round,
       r.Circuit?.circuitName || "",
       countryToCC(r.Circuit?.Location?.country),
-      (r.date || "") + "T" + (r.time || "13:00:00Z")
+      (r.date || "") + "T" + (r.time || "13:00:00Z"),
+      r.Qualifying?.date ? r.Qualifying.date + "T" + (r.Qualifying.time || "14:00:00Z") : null
     )
-  );
-  await env.DB.batch(stmts);
+  ));
   return races.length;
 }
 
+/* Who is actually racing. Taken from race entry lists rather than the driver
+   list, because the driver list includes reserves and drivers who have left —
+   which is what previously let the draw pick someone who never started. */
 async function syncDrivers(env, season) {
-  /* driverStandings carries the constructor alongside each driver, which the
-     plain drivers endpoint does not. Early in a season it can be empty, so
-     fall back to the driver list with no team attached. */
-  let rows = [];
-  try {
-    const d = await jolpica(env, season + "/driverStandings/?limit=100");
-    const list = d?.MRData?.StandingsTable?.StandingsLists?.[0]?.DriverStandings || [];
-    rows = list.map((s) => ({ d: s.Driver, team: teamSlug(s.Constructors?.[0]?.constructorId) }));
-  } catch { /* fall through */ }
-  if (!rows.length) {
-    const d = await jolpica(env, season + "/drivers/?limit=100");
-    rows = (d?.MRData?.DriverTable?.Drivers || []).map((dr) => ({ d: dr, team: null }));
+  const rounds = await env.DB.prepare(
+    "SELECT round FROM rounds WHERE season = ?1 AND start <= ?2 ORDER BY round DESC LIMIT 4"
+  ).bind(Number(season), new Date().toISOString()).all();
+
+  const seen = new Map();
+  for (const { round } of rounds.results || []) {
+    try {
+      const d = await jolpica(env, season + "/" + round + "/results/?limit=100");
+      for (const r of d?.MRData?.RaceTable?.Races?.[0]?.Results || []) {
+        const prev = seen.get(r.Driver.driverId);
+        seen.set(r.Driver.driverId, {
+          d: r.Driver,
+          team: teamSlug(r.Constructor?.constructorId),
+          no: Number(r.number) || Number(r.Driver.permanentNumber) || null,
+          starts: (prev?.starts || 0) + 1,
+        });
+      }
+    } catch { /* one bad round shouldn't sink the sync */ }
   }
-  if (!rows.length) return 0;
-  const stmts = rows.map(({ d, team }) =>
+
+  /* Nothing has been run yet: fall back to the standings, then the roster. */
+  if (!seen.size) {
+    for (const path of [season + "/driverstandings/?limit=100", season + "/drivers/?limit=100"]) {
+      try {
+        const d = await jolpica(env, path);
+        const standing = d?.MRData?.StandingsTable?.StandingsLists?.[0]?.DriverStandings;
+        if (standing?.length) {
+          for (const st of standing) {
+            seen.set(st.Driver.driverId, {
+              d: st.Driver, team: teamSlug(st.Constructors?.[0]?.constructorId),
+              no: Number(st.Driver.permanentNumber) || null, starts: 0,
+            });
+          }
+          break;
+        }
+        const roster = d?.MRData?.DriverTable?.Drivers;
+        if (roster?.length) {
+          for (const dr of roster) {
+            seen.set(dr.driverId, { d: dr, team: null, no: Number(dr.permanentNumber) || null, starts: 0 });
+          }
+          break;
+        }
+      } catch { /* try the next one */ }
+    }
+  }
+  if (!seen.size) return 0;
+
+  /* A driver counts as active if they started the most recent race we looked
+     at, or at least half of them. One-off stand-ins stay out of the pool. */
+  const maxStarts = Math.max(...[...seen.values()].map((v) => v.starts), 0);
+  await env.DB.batch([...seen.entries()].map(([id, v]) =>
     env.DB.prepare(
-      `INSERT INTO drivers (id, season, first, last, code, no, team)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-       ON CONFLICT(id) DO UPDATE SET season=?2, first=?3, last=?4, code=?5, no=?6, team=COALESCE(?7, team)`
+      `INSERT INTO drivers (id, season, first, last, code, no, team, starts, active, wiki)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+       ON CONFLICT(id) DO UPDATE SET season=?2, first=?3, last=?4, code=?5,
+         no=COALESCE(?6, no), team=COALESCE(?7, team), starts=?8, wiki=COALESCE(?10, wiki)`
     ).bind(
-      d.driverId,
-      Number(season),
-      d.givenName || "",
-      d.familyName || "",
-      d.code || null,
-      d.permanentNumber ? Number(d.permanentNumber) : null,
-      team
+      id, Number(season), v.d.givenName || "", v.d.familyName || "", v.d.code || null,
+      v.no, v.team, v.starts,
+      maxStarts === 0 || v.starts * 2 >= maxStarts ? 1 : 0,
+      v.d.url || null
     )
-  );
-  await env.DB.batch(stmts);
-  return rows.length;
+  ));
+  return seen.size;
+}
+
+/* Driver portraits. Ergast hands us each driver's Wikipedia page, so the photo
+   comes from Wikimedia, where it is freely licensed. We store the URL, not the
+   image, and keep the page link so the credit can be shown. */
+async function syncPhotos(env, season) {
+  const rows = await env.DB.prepare(
+    "SELECT id, wiki, first, last FROM drivers WHERE season = ?1 AND photo IS NULL AND active = 1"
+  ).bind(Number(season)).all();
+  let got = 0;
+  for (const d of rows.results || []) {
+    const title = d.wiki
+      ? decodeURIComponent(String(d.wiki).split("/wiki/")[1] || "")
+      : (d.first + "_" + d.last).replace(/\s+/g, "_");
+    if (!title) continue;
+    try {
+      const res = await fetch("https://en.wikipedia.org/api/rest_v1/page/summary/" + encodeURIComponent(title), {
+        headers: { "User-Agent": env.USER_AGENT || "GridCall/1.0", Accept: "application/json" },
+      });
+      if (!res.ok) continue;
+      const j = await res.json();
+      const url = j?.thumbnail?.source || j?.originalimage?.source;
+      if (!url) continue;
+      await env.DB.prepare("UPDATE drivers SET photo = ?1, wiki = COALESCE(?2, wiki) WHERE id = ?3")
+        .bind(url, j?.content_urls?.desktop?.page || null, d.id).run();
+      got++;
+    } catch { /* a missing portrait is not worth failing the sync for */ }
+  }
+  return got;
 }
 
 async function syncResult(env, season, round) {
   const data = await jolpica(env, season + "/" + round + "/results/?limit=100");
-  const race = data?.MRData?.RaceTable?.Races?.[0];
-  const results = race?.Results || [];
+  const results = data?.MRData?.RaceTable?.Races?.[0]?.Results || [];
   if (!results.length) return 0;
   await env.DB.prepare("DELETE FROM results WHERE season = ?1 AND round = ?2").bind(Number(season), Number(round)).run();
-  const stmts = results.map((r) =>
+  await env.DB.batch(results.map((r) =>
     env.DB.prepare("INSERT INTO results (season, round, pos, driver_id) VALUES (?1, ?2, ?3, ?4)")
       .bind(Number(season), Number(round), Number(r.position), r.Driver.driverId)
-  );
-  await env.DB.batch(stmts);
+  ));
   return results.length;
 }
 
-/** Pull anything that's missing. Safe to call as often as you like. */
+async function syncQuali(env, season, round) {
+  const data = await jolpica(env, season + "/" + round + "/qualifying/?limit=100");
+  const q = data?.MRData?.RaceTable?.Races?.[0]?.QualifyingResults || [];
+  if (!q.length) return 0;
+  await env.DB.prepare("DELETE FROM quali WHERE season = ?1 AND round = ?2").bind(Number(season), Number(round)).run();
+  await env.DB.batch(q.map((r) =>
+    env.DB.prepare("INSERT INTO quali (season, round, pos, driver_id) VALUES (?1, ?2, ?3, ?4)")
+      .bind(Number(season), Number(round), Number(r.position), r.Driver.driverId)
+  ));
+  return q.length;
+}
+
+/** Pull anything missing. Runs in the background; progress lands in settings. */
 async function syncAll(env, season) {
-  const report = { schedule: 0, drivers: 0, results: [] };
-  report.schedule = await syncSchedule(env, season);
-  report.drivers = await syncDrivers(env, season);
-  const due = await env.DB.prepare(
-    `SELECT r.round FROM rounds r
-     WHERE r.season = ?1 AND r.start <= ?2
-       AND NOT EXISTS (SELECT 1 FROM results x WHERE x.season = r.season AND x.round = r.round)
-     ORDER BY r.round`
-  ).bind(Number(season), new Date().toISOString()).all();
-  for (const row of due.results || []) {
-    try {
-      const n = await syncResult(env, season, row.round);
-      if (n) report.results.push({ round: row.round, positions: n });
-    } catch (e) {
-      report.results.push({ round: row.round, error: String(e.message || e) });
+  const note = async (o) => putSetting(env, "syncState", { at: Date.now(), ...o });
+  try {
+    await note({ busy: true, step: "calendar" });
+    const schedule = await syncSchedule(env, season);
+
+    await note({ busy: true, step: "drivers" });
+    const drivers = await syncDrivers(env, season);
+
+    await note({ busy: true, step: "results" });
+    const due = await env.DB.prepare(
+      `SELECT round FROM rounds WHERE season = ?1 AND start <= ?2
+         AND round NOT IN (SELECT round FROM results WHERE season = ?1)
+       ORDER BY round`
+    ).bind(Number(season), new Date().toISOString()).all();
+    let races = 0;
+    for (const row of due.results || []) {
+      try { if (await syncResult(env, season, row.round)) races++; } catch { /* skip */ }
     }
+
+    await note({ busy: true, step: "qualifying" });
+    const qdue = await env.DB.prepare(
+      `SELECT round FROM rounds WHERE season = ?1 AND start <= ?2
+         AND round NOT IN (SELECT round FROM quali WHERE season = ?1)
+       ORDER BY round`
+    ).bind(Number(season), new Date().toISOString()).all();
+    let qualis = 0;
+    for (const row of qdue.results || []) {
+      try { if (await syncQuali(env, season, row.round)) qualis++; } catch { /* skip */ }
+    }
+
+    await note({ busy: true, step: "portraits" });
+    const photos = await syncPhotos(env, season);
+
+    /* Starts are what decide the pool, so recount once everything is in. */
+    await env.DB.prepare(
+      `UPDATE drivers SET starts = (
+         SELECT COUNT(*) FROM results r WHERE r.driver_id = drivers.id AND r.season = drivers.season
+       ) WHERE season = ?1`
+    ).bind(Number(season)).run();
+
+    await note({ busy: false, ok: true, schedule, drivers, races, qualis, photos });
+  } catch (e) {
+    await note({ busy: false, ok: false, error: String(e.message || e) });
   }
-  return report;
 }
 
 const CC_BY_COUNTRY = {
@@ -257,9 +361,7 @@ const CC_BY_COUNTRY = {
   germany: "DE", portugal: "PT", turkey: "TR", russia: "RU", malaysia: "MY",
 };
 
-function countryToCC(country) {
-  return CC_BY_COUNTRY[String(country || "").toLowerCase()] || "";
-}
+const countryToCC = (c) => CC_BY_COUNTRY[String(c || "").toLowerCase()] || "";
 
 /* ---------- the game model ---------- */
 
@@ -302,25 +404,31 @@ function scoreFor(guess, actual, s) {
 /** Everything the app needs, assembled once. */
 async function buildState(env, season, meId) {
   const cfg = await getSettings(env);
-  const [playersQ, driversQ, roundsQ, resultsQ, picksQ] = await Promise.all([
-    env.DB.prepare("SELECT id, name, photo, color, is_admin FROM players ORDER BY joined").all(),
-    env.DB.prepare("SELECT id, first, last, code, no, team FROM drivers WHERE season = ?1 ORDER BY id").bind(season).all(),
-    env.DB.prepare("SELECT round, name, circuit, cc, start FROM rounds WHERE season = ?1 ORDER BY round").bind(season).all(),
+  const [playersQ, driversQ, roundsQ, resultsQ, qualiQ, picksQ] = await Promise.all([
+    env.DB.prepare("SELECT id, name, photo, color, favourite, is_admin FROM players ORDER BY joined").all(),
+    env.DB.prepare("SELECT id, first, last, code, no, team, photo, wiki, active, starts FROM drivers WHERE season = ?1 ORDER BY id").bind(season).all(),
+    env.DB.prepare("SELECT round, name, circuit, cc, start, quali_at FROM rounds WHERE season = ?1 ORDER BY round").bind(season).all(),
     env.DB.prepare("SELECT round, pos, driver_id FROM results WHERE season = ?1 ORDER BY round, pos").bind(season).all(),
-    env.DB.prepare("SELECT round, player_id, pos FROM picks WHERE season = ?1").bind(season).all(),
+    env.DB.prepare("SELECT round, pos, driver_id FROM quali WHERE season = ?1 ORDER BY round, pos").bind(season).all(),
+    env.DB.prepare("SELECT round, player_id, pos, fav_pos, pole_driver FROM picks WHERE season = ?1").bind(season).all(),
   ]);
 
   const players = (playersQ.results || []).map((p) => ({
-    id: p.id, name: p.name, photo: p.photo, color: p.color, isAdmin: !!p.is_admin,
+    id: p.id, name: p.name, photo: p.photo, color: p.color,
+    favourite: p.favourite, isAdmin: !!p.is_admin,
   }));
-  const drivers = driversQ.results || [];
-  const driverIds = drivers.map((d) => d.id);
+  const drivers = (driversQ.results || []).map((d) => ({ ...d, active: !!d.active }));
+  /* Only drivers who are actually racing go in the draw. */
+  const pool = drivers.filter((d) => d.active).map((d) => d.id);
 
-  const resultByRound = {};
+  const resultByRound = {}, poleByRound = {};
   for (const r of resultsQ.results || []) (resultByRound[r.round] ||= [])[r.pos - 1] = r.driver_id;
+  for (const q of qualiQ.results || []) if (q.pos === 1) poleByRound[q.round] = q.driver_id;
 
   const pickByRound = {};
-  for (const p of picksQ.results || []) (pickByRound[p.round] ||= {})[p.player_id] = p.pos;
+  for (const p of picksQ.results || []) {
+    (pickByRound[p.round] ||= {})[p.player_id] = { pos: p.pos, favPos: p.fav_pos, pole: p.pole_driver };
+  }
 
   const now = Date.now();
   const all = roundsQ.results || [];
@@ -330,49 +438,67 @@ async function buildState(env, season, meId) {
   const rounds = inPlay.map((r, i) => {
     const result = resultByRound[r.round] || null;
     const locked = new Date(r.start).getTime() <= now || !!result;
+    const driverId = drawFor(pool, cfg.seed, i);
     const raw = pickByRound[r.round] || {};
+    const mine = meId ? raw[meId] || null : null;
+    /* If the drawn driver never took the start, say so rather than silently
+       scoring everyone zero — which is exactly what used to happen. */
+    const voided = !!result && !!driverId && result.indexOf(driverId) === -1;
     return {
-      round: r.round,
-      gi: i,
-      name: r.name,
-      circuit: r.circuit,
-      cc: r.cc,
-      start: r.start,
-      driverId: drawFor(driverIds, cfg.seed, i),
-      locked,
-      result,
-      /* Before lights out, all anyone gets is a count and their own call. */
-      picks: locked ? raw : { count: Object.keys(raw).length, mine: meId ? raw[meId] ?? null : null },
+      round: r.round, gi: i, name: r.name, circuit: r.circuit, cc: r.cc,
+      start: r.start, qualiAt: r.quali_at,
+      driverId, locked, result, voided, pole: poleByRound[r.round] || null,
+      picks: locked ? raw : { count: Object.keys(raw).length, mine },
     };
   });
 
   const acc = {};
-  for (const p of players) acc[p.id] = { id: p.id, pts: 0, exact: 0, called: 0, offSum: 0, offN: 0 };
+  for (const p of players) acc[p.id] = { id: p.id, pts: 0, exact: 0, called: 0, offSum: 0, offN: 0, poles: 0 };
+  const favOf = Object.fromEntries(players.map((p) => [p.id, p.favourite]));
+
   for (const r of rounds) {
-    if (!r.result || !r.driverId) continue;
-    const actual = r.result.indexOf(r.driverId) + 1;
-    if (!actual) continue;
-    for (const [pid, pos] of Object.entries(pickByRound[r.round] || {})) {
+    if (!r.result) continue;
+    const actual = r.driverId ? r.result.indexOf(r.driverId) + 1 : 0;
+    for (const [pid, pick] of Object.entries(pickByRound[r.round] || {})) {
       const a = acc[pid];
       if (!a) continue;
-      a.pts += scoreFor(pos, actual, cfg.scoring);
-      a.called += 1;
-      if (pos === actual) a.exact += 1;
-      a.offSum += Math.abs(pos - actual);
-      a.offN += 1;
+      if (actual && pick.pos) {
+        a.pts += scoreFor(pick.pos, actual, cfg.scoring);
+        a.called += 1;
+        if (pick.pos === actual) a.exact += 1;
+        a.offSum += Math.abs(pick.pos - actual); a.offN += 1;
+      }
+      if (cfg.modes.favourite && pick.favPos && favOf[pid]) {
+        const favActual = r.result.indexOf(favOf[pid]) + 1;
+        if (favActual) {
+          a.pts += Math.round(scoreFor(pick.favPos, favActual, cfg.scoring) * (cfg.scoring.favScale / 100));
+        }
+      }
+      if (cfg.modes.pole && pick.pole && r.pole) {
+        if (pick.pole === r.pole) { a.pts += cfg.scoring.poleExact; a.poles += 1; }
+        else {
+          const qp = (qualiQ.results || []).find((q) => q.round === r.round && q.driver_id === pick.pole);
+          if (qp && qp.pos === 2) a.pts += cfg.scoring.poleFrontRow;
+        }
+      }
     }
   }
+
   const standings = Object.values(acc)
     .map((a) => ({ ...a, avgOff: a.offN ? a.offSum / a.offN : null }))
     .sort((a, b) => b.pts - a.pts || b.exact - a.exact || a.id.localeCompare(b.id));
 
-  const me = meId ? players.find((p) => p.id === meId) || null : null;
-  return { season, me, players, drivers, rounds, standings, scoring: cfg.scoring, startRound, allRounds: all.map((r) => ({ round: r.round, name: r.name })) };
+  return {
+    season, me: meId ? players.find((p) => p.id === meId) || null : null,
+    players, drivers, rounds, standings,
+    scoring: cfg.scoring, modes: cfg.modes, syncState: cfg.syncState, startRound,
+    allRounds: all.map((r) => ({ round: r.round, name: r.name })),
+  };
 }
 
 /* ---------- routes ---------- */
 
-async function handleApi(request, env, url) {
+async function handleApi(request, env, url, ctx) {
   const path = url.pathname.replace(/^\/api/, "") || "/";
   const method = request.method;
   const season = Number(env.SEASON) || new Date().getUTCFullYear();
@@ -430,16 +556,35 @@ async function handleApi(request, env, url) {
   if (path === "/pick" && method === "POST") {
     const me = await requireMe();
     if (!me) return bad("Sign in first.", 401);
-    const round = Number(body.round), pos = Number(body.pos);
-    if (!round || !pos || pos < 1 || pos > 30) return bad("That isn't a valid call.");
-    const r = await env.DB.prepare("SELECT start FROM rounds WHERE season = ?1 AND round = ?2").bind(season, round).first();
+    const round = Number(body.round);
+    const r = await env.DB.prepare("SELECT start, quali_at FROM rounds WHERE season = ?1 AND round = ?2")
+      .bind(season, round).first();
     if (!r) return bad("No such round.", 404);
     /* The real lock. The app hides the grid too, but this is what enforces it. */
     if (new Date(r.start).getTime() <= Date.now()) return bad("That race has started. Calls are closed.", 409);
+
+    const cfg = await getSettings(env);
+    const prev = await env.DB.prepare("SELECT pos, fav_pos, pole_driver FROM picks WHERE season=?1 AND round=?2 AND player_id=?3")
+      .bind(season, round, me.id).first();
+
+    const num = (v, fallback) => (v === undefined ? fallback : v === null ? null : Number(v) || null);
+    const pos = num(body.pos, prev?.pos ?? null);
+    const favPos = cfg.modes.favourite ? num(body.favPos, prev?.fav_pos ?? null) : null;
+    let pole = cfg.modes.pole ? (body.pole === undefined ? prev?.pole_driver ?? null : body.pole || null) : null;
+
+    if (pos !== null && (pos < 1 || pos > 30)) return bad("That isn't a valid call.");
+    if (favPos !== null && (favPos < 1 || favPos > 30)) return bad("That isn't a valid call.");
+    /* Pole closes when qualifying starts, not when the race does. */
+    if (pole && r.quali_at && new Date(r.quali_at).getTime() <= Date.now() && pole !== (prev?.pole_driver ?? null)) {
+      return bad("Qualifying has started. Pole calls are closed.", 409);
+    }
+
     await env.DB.prepare(
-      `INSERT INTO picks (season, round, player_id, pos, at) VALUES (?1, ?2, ?3, ?4, ?5)
-       ON CONFLICT(season, round, player_id) DO UPDATE SET pos = ?4, at = ?5`
-    ).bind(season, round, me.id, pos, Date.now()).run();
+      `INSERT INTO picks (season, round, player_id, pos, fav_pos, pole_driver, at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+       ON CONFLICT(season, round, player_id)
+       DO UPDATE SET pos = ?4, fav_pos = ?5, pole_driver = ?6, at = ?7`
+    ).bind(season, round, me.id, pos, favPos, pole, Date.now()).run();
     return json(await buildState(env, season, me.id));
   }
 
@@ -459,6 +604,9 @@ async function handleApi(request, env, url) {
       await env.DB.prepare("UPDATE players SET photo = ?1 WHERE id = ?2").bind(photo || null, me.id).run();
     }
     if (color) await env.DB.prepare("UPDATE players SET color = ?1 WHERE id = ?2").bind(color, me.id).run();
+    if (body.favourite !== undefined) {
+      await env.DB.prepare("UPDATE players SET favourite = ?1 WHERE id = ?2").bind(body.favourite || null, me.id).run();
+    }
     if (password) {
       if (String(password).length < 8) return bad("Passwords need at least 8 characters.");
       const { hash, salt } = await hashPassword(String(password));
@@ -483,12 +631,11 @@ async function handleApi(request, env, url) {
     if (!me.is_admin) return bad("Organisers only.", 403);
 
     if (path === "/admin/sync" && method === "POST") {
-      try {
-        const report = await syncAll(env, season);
-        return json({ ok: true, report, state: await buildState(env, season, me.id) });
-      } catch (e) {
-        return bad("Jolpica didn't answer: " + (e.message || e), 502);
-      }
+      /* Jolpica is slow and a full pull is many requests, so this returns
+         immediately and the app watches syncState for progress. */
+      await putSetting(env, "syncState", { at: Date.now(), busy: true, step: "starting" });
+      ctx.waitUntil(syncAll(env, season));
+      return json(await buildState(env, season, me.id));
     }
 
     if (path === "/admin/settings" && method === "POST") {
@@ -497,8 +644,20 @@ async function handleApi(request, env, url) {
         for (const k of Object.keys(DEFAULT_SCORING)) clean[k] = Number(body.scoring[k]) || 0;
         await putSetting(env, "scoring", clean);
       }
+      if (body.modes) {
+        const cur = (await getSettings(env)).modes;
+        await putSetting(env, "modes", { ...cur, ...body.modes });
+      }
       if (body.startRound !== undefined) await putSetting(env, "startRound", Number(body.startRound) || 0);
       if (body.reshuffle) await putSetting(env, "seed", Math.floor(Math.random() * 1e9));
+      return json(await buildState(env, season, me.id));
+    }
+
+    if (path === "/admin/driver" && method === "POST") {
+      /* Override the automatic pool, for when a mid-season change confuses it. */
+      if (!body.id) return bad("Which driver?");
+      await env.DB.prepare("UPDATE drivers SET active = ?1 WHERE id = ?2")
+        .bind(body.active ? 1 : 0, body.id).run();
       return json(await buildState(env, season, me.id));
     }
 
@@ -548,7 +707,7 @@ export default {
         return bad("SESSION_SECRET is not set. Run: wrangler secret put SESSION_SECRET", 500);
       }
       try {
-        return await handleApi(request, env, url);
+        return await handleApi(request, env, url, ctx);
       } catch (e) {
         console.error(e);
         return bad("Something broke on the server: " + (e.message || e), 500);
