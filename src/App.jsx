@@ -18,6 +18,8 @@ html, body, #root { margin: 0; padding: 0; background: #05080E; min-height: 100%
   --go: #37D67A;
   --caution: #F2C94C;
   --stop: #EB5757;
+  --scrim: rgba(5,8,14,0.94);
+  --sel: #1C2737;
   --font-d: 'Barlow Condensed', 'Oswald', 'Arial Narrow', sans-serif;
   --font-b: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: var(--ink);
@@ -30,6 +32,26 @@ html, body, #root { margin: 0; padding: 0; background: #05080E; min-height: 100%
   -webkit-font-smoothing: antialiased;
 }
 .gc .wrap { max-width: 560px; margin: 0 auto; padding: 0 0 92px; }
+
+/* Follows the device. Team colours are variables rather than literals so this
+   block can darken the pale ones, which are unreadable on white. */
+@media (prefers-color-scheme: light) {
+  .gc {
+    --ink: #F3F5F9;
+    --panel: #FFFFFF;
+    --raise: #EAEEF4;
+    --line: #D8DFE8;
+    --text: #0D141E;
+    --dim: #56657A;
+    --faint: #8794A6;
+    --go: #17924B;
+    --caution: #9A6B00;
+    --stop: #C0392B;
+    --scrim: rgba(243,245,249,0.94);
+    --sel: #DCE4EF;
+  }
+  .gc .dot.pulse { opacity: 1; }
+}
 
 /* ---- typography ---- */
 .gc h1, .gc h2, .gc h3, .gc .disp {
@@ -50,7 +72,7 @@ html, body, #root { margin: 0; padding: 0; background: #05080E; min-height: 100%
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; gap: 10px;
   padding: 11px 16px;
-  background: rgba(5,8,14,0.93);
+  background: var(--scrim);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line);
 }
@@ -126,11 +148,17 @@ html, body, #root { margin: 0; padding: 0; background: #05080E; min-height: 100%
 .gc .dcard { display: flex; align-items: stretch; background: var(--raise); border-radius: 3px; overflow: hidden; }
 .gc .dcard .bar { width: 6px; flex: none; }
 .gc .dcard .body { padding: 14px 16px; flex: 1; }
-.gc .dcard .face { width: 68px; flex: none; background: #0A1017; object-fit: cover; object-position: top center; }
-.gc .mug { width: 26px; height: 26px; border-radius: 3px; object-fit: cover; object-position: top center; background: #0A1017; flex: none; }
+.gc .dcard .face { width: 68px; flex: none; background: var(--raise); object-fit: cover; object-position: top center; }
+.gc .mug { width: 26px; height: 26px; border-radius: 3px; object-fit: cover; object-position: top center; background: var(--raise); flex: none; }
 .gc .picker { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; }
 .gc .pick1 { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: var(--raise); border-radius: 3px; border: 1px solid transparent; text-align: left; font-size: 13px; }
-.gc .pick1.on { border-color: var(--text); background: #1C2737; }
+.gc .pick1.on { border-color: var(--text); background: var(--sel); }
+.gc .pick1[disabled] { opacity: .4; }
+.gc .shut { opacity: .45; }
+.gc .shut button { cursor: not-allowed; }
+.gc .saved { display: flex; align-items: center; justify-content: center; gap: 7px; padding: 13px; font-size: 13px; color: var(--dim); min-height: 46px; }
+.gc .saved.ok { color: var(--go); }
+.gc .saved.bad { color: var(--stop); }
 .gc .toggle { display: flex; align-items: center; justify-content: space-between; padding: 13px 0; border-bottom: 1px solid var(--line); }
 .gc .sw { width: 46px; height: 27px; border-radius: 14px; background: var(--line); position: relative; flex: none; transition: background .15s ease; }
 .gc .sw.on { background: var(--go); }
@@ -141,7 +169,7 @@ html, body, #root { margin: 0; padding: 0; background: #05080E; min-height: 100%
 .gc .tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
   display: flex; max-width: 560px; margin: 0 auto;
-  background: rgba(5,8,14,0.96);
+  background: var(--scrim);
   backdrop-filter: blur(12px);
   border-top: 1px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom);
@@ -163,6 +191,14 @@ html, body, #root { margin: 0; padding: 0; background: #05080E; min-height: 100%
 
 /* ===================== reference data ===================== */
 
+
+/* Pale team colours need a darker twin or they disappear on a white panel. */
+const TEAM_LIGHT = {
+  haas: "#7D858E", cadillac: "#6B7685", mercedes: "#00A48C", rb: "#3C68D8",
+};
+
+/** Reference a team's colour so the stylesheet, not JS, decides the shade. */
+const teamColor = (slug) => "var(--team-" + (slug || "unknown") + ", var(--dim))";
 
 const TEAMS = {
   mclaren:   { name: "McLaren",      color: "#FF8000" },
@@ -241,6 +277,12 @@ const DEFAULT_SCORING = {
   points: 3,
 };
 
+const TEAM_CSS = ".gc {" +
+  Object.entries(TEAMS).map(([k, v]) => "--team-" + k + ":" + v.color + ";").join("") +
+  "}@media (prefers-color-scheme: light){.gc {" +
+  Object.entries(TEAM_LIGHT).map(([k, v]) => "--team-" + k + ":" + v + ";").join("") +
+  "}}";
+
 const AVATAR_COLORS = ["#37D67A", "#F2C94C", "#EB5757", "#56CCF2", "#BB6BD9", "#F2994A", "#6FCF97", "#9AA2B1"];
 
 
@@ -303,7 +345,7 @@ function TrackMap({ circuit, country, color }) {
   }
   return (
     <svg className="track" viewBox="0 0 200 110" role="img" aria-label={"Stylised layout of " + circuit}>
-      <path d={TRACK_PATHS[key]} fill="none" stroke="#1B2534" strokeWidth="11" strokeLinejoin="round" strokeLinecap="round" />
+      <path d={TRACK_PATHS[key]} fill="none" stroke="var(--raise)" strokeWidth="11" strokeLinejoin="round" strokeLinecap="round" />
       <path d={TRACK_PATHS[key]} fill="none" stroke={color || "#EAEFF6"} strokeWidth="2.4" strokeLinejoin="round" strokeLinecap="round" />
     </svg>
   );
@@ -314,14 +356,14 @@ function DriverCard({ driver, sub }) {
   const t = TEAMS[driver.team] || { name: "", color: "#9AA2B1" };
   return (
     <div className="dcard">
-      <div className="bar" style={{ background: t.color }} />
+      <div className="bar" style={{ background: teamColor(driver.team) }} />
       {driver.photo && <img className="face" src={driver.photo} alt="" loading="lazy" />}
       <div className="body spread">
         <div>
           <div className="disp" style={{ fontSize: 27 }}>{driver.first} {driver.last}</div>
           <div className="meta" style={{ marginTop: 2 }}>{t.name}{sub ? " · " + sub : ""}</div>
         </div>
-        <div className="num" style={{ fontSize: 40, color: t.color, opacity: .9 }}>{driver.no}</div>
+        <div className="num" style={{ fontSize: 40, color: teamColor(driver.team), opacity: .9 }}>{driver.no}</div>
       </div>
     </div>
   );
@@ -384,7 +426,10 @@ function Recap({ round, drivers, players, standings, scoring, me, onOpen }) {
     <button className="panel pad" style={{ width: "100%", textAlign: "left", borderTop: "none" }} onClick={() => onOpen(round.round)}>
       <div className="spread" style={{ alignItems: "flex-start" }}>
         <div className="stack" style={{ minWidth: 0 }}>
-          <div className="tiny">Last round · {round.flag} {round.name}</div>
+          <div className="tiny">
+            Last round · {round.flag} {round.name}
+            {round.provisional && <span style={{ color: "var(--caution)" }}> · provisional</span>}
+          </div>
           <div className="disp" style={{ fontSize: 21, marginTop: 3 }}>
             {round.voided ? "Void — " + (d ? d.last : "driver") + " didn't start"
               : (d ? d.last : "") + " finished " + ordinal(actual)}
@@ -401,35 +446,115 @@ function Recap({ round, drivers, players, standings, scoring, me, onOpen }) {
   );
 }
 
-function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, modes, recap, onPick, now, onOpenRound, onNeedProfile, onNeedFavourite }) {
+function LiveRound({ round, players, me, scoring, onOpen }) {
+  if (!round || !round.driver) return null;
+  const picks = round.pickMap || {};
+  const order = round.result ? round.result.order : null;
+  const at = order ? order.indexOf(round.driver.id) + 1 : 0;
+  const running = !round.result || round.provisional;
+  const rows = Object.entries(picks)
+    .map(([pid, p]) => [pid, p, at && p.pos ? scoreFor(p.pos, at, scoring) : null])
+    .sort((a, b) => (b[2] ?? -1) - (a[2] ?? -1) || (a[1].pos || 99) - (b[1].pos || 99));
+  const callers = Object.keys(picks).length;
+
+  return (
+    <div className="panel" style={{ borderTop: "none" }}>
+      <div className="pad" style={{ paddingBottom: 10 }}>
+        <div className="row" style={{ marginBottom: 6 }}>
+          <span className={"dot" + (running ? " pulse" : "")}
+            style={{ background: running ? "var(--caution)" : "var(--go)" }} />
+          <h3>{running ? "Race under way" : "Result in"} · {round.flag} {round.name}</h3>
+        </div>
+        {at ? (
+          <div className="meta">
+            {round.driver.last} {running ? "is currently" : "finished"} {ordinal(at)}
+            {round.provisional && " · provisional, points can still move"}
+          </div>
+        ) : (
+          <div className="meta">
+            {callers === 0 ? "Nobody called this one." : callers + (callers === 1 ? " call is" : " calls are") + " in."}
+            {" Positions appear as soon as the live feed has them."}
+          </div>
+        )}
+      </div>
+      {rows.map(([pid, p, pts]) => {
+        const pl = players[pid];
+        if (!pl) return null;
+        const off = at && p.pos ? Math.abs(p.pos - at) : null;
+        return (
+          <div key={pid} className={"trow" + (me && pid === me.id ? " me" : "")}>
+            <div className="tp">{p.pos || "—"}</div>
+            <div className="row" style={{ minWidth: 0 }}>
+              <Avatar player={pl} />
+              <div className="stack" style={{ minWidth: 0 }}>
+                <div>{pl.name}</div>
+                <div className="tiny">
+                  {off === null ? "called " + (p.pos ? ordinal(p.pos) : "nothing")
+                    : off === 0 ? "spot on" : off + (off === 1 ? " place away" : " places away")}
+                </div>
+              </div>
+            </div>
+            {pts === null
+              ? <div className="meta">{p.pos ? ordinal(p.pos) : ""}</div>
+              : <div className="num" style={{ fontSize: 20, color: round.provisional ? "var(--caution)" : undefined }}>+{pts}</div>}
+          </div>
+        );
+      })}
+      <div className="pad">
+        <button className="btn ghost" onClick={() => onOpen(round.round)}>
+          {round.result ? "Full classification" : "Round detail"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, modes, scoring, recap, onPick, now, onOpenRound, onNeedProfile, onNeedFavourite }) {
   const [draft, setDraft] = useState({});
-  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState("");   // "", saving, saved, error
+  const timer = useRef(null);
+  const queued = useRef({});
   const rn = round ? round.round : 0;
-  useEffect(() => { setDraft({}); }, [rn]);
+  useEffect(() => { setDraft({}); setStatus(""); queued.current = {}; }, [rn]);
+  useEffect(() => () => clearTimeout(timer.current), []);
 
   if (!round) return <Empty line="Every round has a result. That's the season done." />;
   if (!round.driver) return <Empty line="Waiting on the driver list. An organiser can press Sync now in Settings." />;
 
-  const team = TEAMS[round.driver.team] || { color: "#EAEFF6", name: "" };
+  const team = TEAMS[round.driver.team] || { name: "" };
   const cd = countdown(round.start, now);
   const soon = cd && new Date(round.start) - now < 36 * 3600 * 1000;
   const callers = callCount || 0;
   const fav = me && me.favourite ? drivers.find((d) => d.id === me.favourite) : null;
+  /* Positions available = drivers actually racing. Marking someone out in
+     Settings shortens the grid everywhere it's offered. */
+  const racing = drivers.filter((d) => d.active !== false);
   const qualiShut = round.qualiAt && new Date(round.qualiAt) <= now;
 
   const val = (k) => (draft[k] !== undefined ? draft[k] : myPick ? myPick[k] : null);
-  const dirty = Object.keys(draft).some((k) => draft[k] !== (myPick ? myPick[k] : null));
 
-  async function commit() {
-    setSaving(true);
-    await onPick(round.round, {
-      pos: val("pos") ?? null,
-      favPos: modes.favourite ? val("favPos") ?? null : undefined,
-      sprintPos: modes.sprint ? val("sprintPos") ?? null : undefined,
-      pole: modes.pole ? val("pole") ?? null : undefined,
-    });
-    setSaving(false);
-    setDraft({});
+  /* Calls save themselves. Each change is queued and written after a short
+     pause, so tapping through the grid doesn't fire a request per tap. */
+  function change(key, value) {
+    setDraft((d) => ({ ...d, [key]: value }));
+    queued.current[key] = value;
+    setStatus("saving");
+    clearTimeout(timer.current);
+    timer.current = setTimeout(flush, 700);
+  }
+
+  async function flush() {
+    const payload = queued.current;
+    queued.current = {};
+    if (!Object.keys(payload).length) return;
+    try {
+      await onPick(round.round, payload);
+      setStatus("saved");
+      setTimeout(() => setStatus((v) => (v === "saved" ? "" : v)), 2500);
+    } catch (e) {
+      queued.current = { ...payload, ...queued.current };
+      setStatus("error");
+    }
   }
 
   return (
@@ -440,7 +565,7 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, mod
         <h1 style={{ marginTop: 4 }}>{round.flag} {round.name}</h1>
         <div className="meta" style={{ marginTop: 4 }}>{round.circuit}</div>
         <div style={{ margin: "14px -6px 8px" }}>
-          <TrackMap circuit={round.circuit} country={round.cc} color={team.color} />
+          <TrackMap circuit={round.circuit} country={round.cc} color={teamColor(round.driver.team)} />
         </div>
         <div className="spread" style={{ paddingTop: 10, borderTop: "1px solid var(--line)" }}>
           <div className="meta">{fmtDate(round.start)}</div>
@@ -472,30 +597,58 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, mod
       );
     }
     if (round.locked) {
+      const order = round.result ? round.result.order : null;
+      const at = order ? order.indexOf(round.driver.id) + 1 : 0;
+      const running = !round.result || round.provisional;
+      const rows = Object.entries(picks)
+        .map(([pid, p]) => [pid, p, at && p.pos ? scoreFor(p.pos, at, scoring) : null])
+        .sort((a, b) => (b[2] ?? -1) - (a[2] ?? -1) || (a[1].pos || 99) - (b[1].pos || 99));
       return (
         <div className="panel">
-          <div className="pad" style={{ paddingBottom: 8 }}>
-            <h3>The calls</h3>
-            <div className="meta">{callers === 0 ? "Nobody called this one." : callers + (callers === 1 ? " call is" : " calls are") + " in."}</div>
+          <div className="pad" style={{ paddingBottom: 10 }}>
+            <div className="row" style={{ marginBottom: 6 }}>
+              <span className={"dot" + (running ? " pulse" : "")}
+                style={{ background: running ? "var(--caution)" : "var(--go)" }} />
+              <h3>{running ? "Race under way" : "Result in"}</h3>
+            </div>
+            {at ? (
+              <div className="meta">
+                {round.driver.last} {running ? "is currently" : "finished"} {ordinal(at)}
+                {round.provisional && " · provisional, points can still move"}
+              </div>
+            ) : (
+              <div className="meta">
+                {callers === 0 ? "Nobody called this one." : callers + (callers === 1 ? " call is" : " calls are") + " in."}
+                {" Positions appear as soon as the live feed has them."}
+              </div>
+            )}
           </div>
-          {Object.entries(picks).sort((a, b) => (a[1].pos || 99) - (b[1].pos || 99)).map(([pid, p]) => {
+          {rows.map(([pid, p, pts]) => {
             const pl = players[pid];
             if (!pl) return null;
-            const poleDriver = p.pole ? drivers.find((d) => d.id === p.pole) : null;
+            const off = at && p.pos ? Math.abs(p.pos - at) : null;
             return (
               <div key={pid} className={"trow" + (me && pid === me.id ? " me" : "")}>
                 <div className="tp">{p.pos || "—"}</div>
-                <div className="row"><Avatar player={pl} /><div className="stack">
-                  <div>{pl.name}</div>
-                  {poleDriver && <div className="tiny">pole: {poleDriver.last}</div>}
-                </div></div>
-                <div className="meta">{p.pos ? ordinal(p.pos) : "no call"}</div>
+                <div className="row" style={{ minWidth: 0 }}>
+                  <Avatar player={pl} />
+                  <div className="stack" style={{ minWidth: 0 }}>
+                    <div>{pl.name}</div>
+                    <div className="tiny">
+                      {off === null ? "called " + (p.pos ? ordinal(p.pos) : "nothing")
+                        : off === 0 ? "spot on" : off + (off === 1 ? " place away" : " places away")}
+                    </div>
+                  </div>
+                </div>
+                {pts === null
+                  ? <div className="meta">{p.pos ? ordinal(p.pos) : ""}</div>
+                  : <div className="num" style={{ fontSize: 20, color: round.provisional ? "var(--caution)" : undefined }}>+{pts}</div>}
               </div>
             );
           })}
           <div className="pad">
             <button className="btn ghost" onClick={() => onOpenRound(round.round)}>
-              {round.result ? "See the full result" : "Result not in yet"}
+              {round.result ? "Full classification" : "Round detail"}
             </button>
           </div>
         </div>
@@ -507,7 +660,7 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, mod
         <div className="meta" style={{ marginBottom: 14 }}>
           {myPick && myPick.pos ? "You called " + ordinal(myPick.pos) + "." : "Pick a finishing position."}
         </div>
-        <PositionGrid max={drivers.length} value={val("pos")} onChange={(v) => setDraft({ ...draft, pos: v })} />
+        <PositionGrid max={racing.length} value={val("pos")} onChange={(v) => change("pos", v)} />
 
         {modes.favourite && (fav ? (
           <>
@@ -515,7 +668,7 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, mod
             <div className="meta" style={{ marginBottom: 14 }}>
               Your favourite driver. Worth less than the main call.
             </div>
-            <PositionGrid max={drivers.length} value={val("favPos")} onChange={(v) => setDraft({ ...draft, favPos: v })} />
+            <PositionGrid max={racing.length} value={val("favPos")} onChange={(v) => change("favPos", v)} />
           </>
         ) : (
           <div style={{ marginTop: 22 }}>
@@ -525,47 +678,60 @@ function RaceScreen({ round, drivers, me, players, picks, callCount, myPick, mod
           </div>
         ))}
 
+        {/* Sprint weekends only. A normal weekend has no sprint to call. */}
         {modes.sprint && round.sprintAt && (
-          <>
-            <h3 style={{ margin: "26px 0 4px" }}>And in the sprint?</h3>
+          <div className={round.sprintLocked ? "shut" : ""}>
+            <div className="spread" style={{ margin: "26px 0 4px" }}>
+              <h3>And in the sprint?</h3>
+              {round.sprintLocked && <span className="chip" style={{ color: "var(--stop)" }}>Closed</span>}
+            </div>
             <div className="meta" style={{ marginBottom: 14 }}>
               {round.sprintLocked
-                ? "The sprint has run, so this is locked in."
-                : "Sprint weekend. Closes when the sprint starts, " + fmtDate(round.sprintAt) + "."}
+                ? "The sprint has started, so your call is fixed."
+                : "Closes when the sprint starts, " + fmtDate(round.sprintAt) + "."}
             </div>
-            <PositionGrid max={drivers.length} value={val("sprintPos")} disabled={round.sprintLocked}
-              onChange={(v) => setDraft({ ...draft, sprintPos: v })} />
-          </>
+            <PositionGrid max={racing.length} value={val("sprintPos")} disabled={round.sprintLocked}
+              onChange={(v) => change("sprintPos", v)} />
+          </div>
         )}
 
         {modes.pole && (
-          <>
-            <h3 style={{ margin: "26px 0 4px" }}>Who takes pole?</h3>
+          <div className={qualiShut ? "shut" : ""}>
+            <div className="spread" style={{ margin: "26px 0 4px" }}>
+              <h3>Who takes pole?</h3>
+              {qualiShut && <span className="chip" style={{ color: "var(--stop)" }}>Closed</span>}
+            </div>
             <div className="meta" style={{ marginBottom: 12 }}>
-              {qualiShut ? "Qualifying has started, so this is locked in." : "Closes when qualifying starts."}
+              {qualiShut
+                ? "Qualifying has started, so your call is fixed."
+                : round.qualiAt
+                  ? "Closes when qualifying starts, " + fmtDate(round.qualiAt) + (round.qualiAtExact ? "." : " (estimated).")
+                  : "Closes when qualifying starts."}
             </div>
             <div className="picker">
-              {drivers.map((d) => {
+              {racing.map((d) => {
                 const t = TEAMS[d.team] || {};
                 return (
                   <button key={d.id} disabled={qualiShut}
                     className={"pick1" + (val("pole") === d.id ? " on" : "")}
-                    onClick={() => setDraft({ ...draft, pole: d.id })}>
-                    <span style={{ width: 3, height: 18, background: t.color, borderRadius: 2, flex: "none" }} />
+                    onClick={() => change("pole", d.id)}>
+                    <span style={{ width: 3, height: 18, background: teamColor(d.team), borderRadius: 2, flex: "none" }} />
                     {d.last}
                   </button>
                 );
               })}
             </div>
-          </>
+          </div>
         )}
 
-        <div style={{ marginTop: 18 }}>
-          <button className="btn" disabled={!dirty || saving} onClick={commit}>
-            {saving ? "Saving" : dirty ? "Lock in your calls" : myPick ? "Calls saved" : "Make a call"}
-          </button>
+        <div className={"saved" + (status === "saved" ? " ok" : status === "error" ? " bad" : "")}>
+          {status === "saving" && "Saving…"}
+          {status === "saved" && "Saved"}
+          {status === "error" && (
+            <>Couldn't save.&nbsp;<button style={{ textDecoration: "underline" }} onClick={flush}>Try again</button></>
+          )}
         </div>
-        <div className="tiny" style={{ marginTop: 12, textAlign: "center" }}>
+        <div className="tiny" style={{ textAlign: "center" }}>
           {callers} of {Object.keys(players).length} have called. Everyone's calls appear when the race starts.
         </div>
       </div>
@@ -622,6 +788,14 @@ function SeasonScreen({ rounds, me, picks, scoring, onOpenRound, now }) {
           let right;
           if (r.voided) {
             right = <span className="chip" style={{ color: "var(--caution)" }}>Void</span>;
+          } else if (r.provisional) {
+            const actual = r.result.order.indexOf(r.driver.id) + 1;
+            right = (
+              <div style={{ textAlign: "right" }}>
+                <div className="num" style={{ fontSize: 20, color: "var(--caution)" }}>{actual ? "P" + actual : "—"}</div>
+                <div className="tiny" style={{ color: "var(--caution)" }}>provisional</div>
+              </div>
+            );
           } else if (r.result) {
             const actual = r.result.order.indexOf(r.driver.id) + 1;
             const pts = mine && mine.pos && actual ? scoreFor(mine.pos, actual, scoring) : 0;
@@ -639,7 +813,7 @@ function SeasonScreen({ rounds, me, picks, scoring, onOpenRound, now }) {
           }
           return (
             <button key={r.round} className="trow" style={{ width: "100%", textAlign: "left" }} onClick={() => onOpenRound(r.round)}>
-              <div className="tp" style={{ color: team.color }}>{r.gi + 1}</div>
+              <div className="tp" style={{ color: teamColor(r.driver && r.driver.team) }}>{r.gi + 1}</div>
               <div className="stack" style={{ minWidth: 0 }}>
                 <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.flag} {r.name}</div>
                 <div className="tiny">{r.driver ? r.driver.last + " · " + team.name : "driver not drawn"}</div>
@@ -653,8 +827,16 @@ function SeasonScreen({ rounds, me, picks, scoring, onOpenRound, now }) {
   );
 }
 
-function Classification({ title, order, drivers, highlight, limit = 10 }) {
-  if (!order || !order.length) return null;
+function Classification({ title, order, drivers, highlight, limit = 10, quiet, grid }) {
+  if (!order || !order.length) {
+    if (quiet) return null;
+    return (
+      <>
+        <h3 style={{ margin: "26px 0 6px" }}>{title}</h3>
+        <div className="meta">Not in yet.</div>
+      </>
+    );
+  }
   return (
     <>
       <h3 style={{ margin: "26px 0 8px" }}>{title}</h3>
@@ -666,24 +848,73 @@ function Classification({ title, order, drivers, highlight, limit = 10 }) {
           const on = did === highlight;
           return (
             <div key={did} className="trow" style={{ background: on ? "var(--raise)" : undefined }}>
-              <div className="tp" style={{ color: on ? t.color : undefined }}>{i + 1}</div>
+              <div className="tp" style={{ color: on ? teamColor(d.team) : undefined }}>{i + 1}</div>
               <div className="row" style={{ minWidth: 0 }}>
-                <div style={{ width: 3, height: 20, background: t.color, borderRadius: 2, flex: "none" }} />
+                <div style={{ width: 3, height: 20, background: teamColor(d.team), borderRadius: 2, flex: "none" }} />
                 {d.photo && <img className="mug" src={d.photo} alt="" loading="lazy" />}
                 <div style={{ fontWeight: on ? 600 : 400 }}>{d.last}</div>
               </div>
-              <div className="tiny">{t.name}</div>
+              <div className="tiny" style={{ textAlign: "right" }}>
+                {grid && grid[did] && grid[did] !== i + 1
+                  ? <span style={{ color: "var(--caution)" }}>starts P{grid[did]}</span>
+                  : t.name}
+              </div>
             </div>
           );
         })}
       </div>
+      {grid
+        ? <div className="tiny" style={{ marginTop: 6 }}>
+            Qualifying order. Where it differs, the starting slot after penalties is
+            shown in amber — pole still belongs to whoever set the fastest lap.
+          </div>
+        : title.startsWith("Qualifying") && <div className="tiny" style={{ marginTop: 6 }}>
+            Qualifying order. The starting grid appears once penalties are published.
+          </div>}
       {order.length > limit && <div className="tiny" style={{ marginTop: 6 }}>Top {limit} shown.</div>}
     </>
   );
 }
 
-function RoundSheet({ round, drivers, players, picks, scoring, me, onClose }) {
-  if (!round) return null;
+/** Mirrors the server's scoring, broken into its parts. */
+function breakdown(round, pick, player, scoring, modes) {
+  const order = round.result ? round.result.order : null;
+  const parts = [];
+  if (order && round.driver && pick.pos) {
+    const at = order.indexOf(round.driver.id) + 1;
+    if (at) parts.push({ key: "race", label: round.driver.last, detail: "called " + ordinal(pick.pos) + ", finished " + ordinal(at), pts: scoreFor(pick.pos, at, scoring) });
+  }
+  if (modes.favourite && order && pick.favPos && player && player.favourite) {
+    const fd = (round.allDrivers || []).find((d) => d.id === player.favourite);
+    const at = order.indexOf(player.favourite) + 1;
+    if (at) parts.push({
+      key: "fav", label: (fd ? fd.last : "Favourite") + " (favourite)",
+      detail: "called " + ordinal(pick.favPos) + ", finished " + ordinal(at) + " · " + scoring.favScale + "%",
+      pts: Math.round(scoreFor(pick.favPos, at, scoring) * (scoring.favScale / 100)),
+    });
+  }
+  if (modes.sprint && round.sprint && round.driver && pick.sprintPos) {
+    const at = round.sprint.indexOf(round.driver.id) + 1;
+    if (at) parts.push({
+      key: "sprint", label: "Sprint",
+      detail: "called " + ordinal(pick.sprintPos) + ", finished " + ordinal(at) + " · " + scoring.sprintScale + "%",
+      pts: Math.round(scoreFor(pick.sprintPos, at, scoring) * (scoring.sprintScale / 100)),
+    });
+  }
+  if (modes.pole && round.quali && pick.pole) {
+    const theirPos = round.quali.indexOf(pick.pole) + 1;
+    const pd = (round.allDrivers || []).find((d) => d.id === pick.pole);
+    if (theirPos === 1) parts.push({ key: "pole", label: "Pole", detail: (pd ? pd.last : "pick") + " took pole", pts: scoring.poleExact });
+    else if (theirPos === 2) parts.push({ key: "pole", label: "Pole", detail: (pd ? pd.last : "pick") + " qualified second", pts: scoring.poleFrontRow });
+    else if (theirPos) parts.push({ key: "pole", label: "Pole", detail: (pd ? pd.last : "pick") + " qualified " + ordinal(theirPos), pts: 0 });
+  }
+  return { parts, total: parts.reduce((n, p) => n + p.pts, 0) };
+}
+
+function RoundSheet({ round, drivers, players, picks, scoring, modes, me, onClose }) {
+  const [open, setOpen] = useState(null);
+  if (!round || !round.driver) return null;
+  round = { ...round, allDrivers: drivers };
   const order = round.result ? round.result.order : null;
   const actual = order ? order.indexOf(round.driver.id) + 1 : null;
   const team = TEAMS[round.driver.team] || {};
@@ -694,6 +925,11 @@ function RoundSheet({ round, drivers, players, picks, scoring, me, onClose }) {
   return (
     <Sheet title={round.flag + " " + round.name} onClose={onClose}>
       <DriverCard driver={round.driver} sub={actual ? "finished " + ordinal(actual) : "result pending"} />
+      <Classification title={"Qualifying" + (round.qualiProvisional ? " (provisional)" : "")}
+        order={round.quali} drivers={drivers} highlight={round.driver.id} grid={round.grid} />
+      {round.sprintAt && (
+        <Classification title="Sprint" order={round.sprint} drivers={drivers} highlight={round.driver.id} />
+      )}
       {round.voided ? (
         <div className="meta" style={{ marginTop: 18 }}>
           {round.driver.last} didn't take the start, so this round scores nothing for anyone.
@@ -706,31 +942,54 @@ function RoundSheet({ round, drivers, players, picks, scoring, me, onClose }) {
       ) : (
         <>
           <h3 style={{ margin: "22px 0 4px" }}>How everyone called it</h3>
-          <div className="meta" style={{ marginBottom: 6 }}>{round.driver.last} finished {ordinal(actual)}.</div>
+          <div className="meta" style={{ marginBottom: 6 }}>
+            {round.driver.last} finished {ordinal(actual)}.
+            {round.provisional && " This is the live order — points can still move when the stewards finish."}
+          </div>
           {entries.length === 0 && <div className="meta">Nobody called this round.</div>}
-          {entries.filter(([, p]) => p.pos).map(([pid, p]) => [pid, p, scoreFor(p.pos, actual, scoring)])
-            .sort((a, b) => b[2] - a[2])
-            .map(([pid, p, pts]) => {
+          {entries.map(([pid, p]) => [pid, p, breakdown(round, p, players[pid], scoring, modes || {})])
+            .sort((a, b) => b[2].total - a[2].total)
+            .map(([pid, p, b]) => {
               const pl = players[pid];
               if (!pl) return null;
-              const off = Math.abs(p.pos - actual);
+              const off = p.pos ? Math.abs(p.pos - actual) : null;
+              const isOpen = open === pid;
               return (
-                <div key={pid} className={"trow" + (me && pid === me.id ? " me" : "")} style={{ marginLeft: -16, marginRight: -16 }}>
-                  <div className="tp" style={{ color: off === 0 ? "var(--go)" : undefined }}>{p.pos}</div>
-                  <div className="row">
-                    <Avatar player={pl} />
-                    <div className="stack">
-                      <div>{pl.name}</div>
-                      <div className="tiny">{off === 0 ? "spot on" : off + (off === 1 ? " place out" : " places out")}</div>
+                <div key={pid} style={{ marginLeft: -16, marginRight: -16 }}>
+                  <button className={"trow" + (me && pid === me.id ? " me" : "")}
+                    style={{ width: "100%", textAlign: "left" }}
+                    onClick={() => setOpen(isOpen ? null : pid)}>
+                    <div className="tp" style={{ color: off === 0 ? "var(--go)" : undefined }}>{p.pos || "—"}</div>
+                    <div className="row">
+                      <Avatar player={pl} />
+                      <div className="stack">
+                        <div>{pl.name}</div>
+                        <div className="tiny">
+                          {off === null ? "no call on the drawn driver"
+                            : off === 0 ? "spot on" : off + (off === 1 ? " place out" : " places out")}
+                          {b.parts.length > 1 ? " · " + b.parts.length + " parts" : ""}
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                  <div className="num" style={{ fontSize: 20 }}>+{pts}</div>
+                    <div className="num" style={{ fontSize: 20 }}>+{b.total}</div>
+                  </button>
+                  {isOpen && (
+                    <div style={{ padding: "4px 16px 14px", background: "var(--raise)" }}>
+                      {b.parts.length === 0 && <div className="tiny">Nothing scored this round.</div>}
+                      {b.parts.map((part) => (
+                        <div key={part.key} className="spread" style={{ padding: "6px 0" }}>
+                          <div className="stack" style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 14 }}>{part.label}</div>
+                            <div className="tiny">{part.detail}</div>
+                          </div>
+                          <div className="num" style={{ fontSize: 17 }}>+{part.pts}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               );
             })}
-          <Classification title="Qualifying" order={round.quali} drivers={drivers} highlight={round.driver.id} />
-          <Classification title="Sprint" order={round.sprint} drivers={drivers} highlight={round.driver.id} />
-
           <h3 style={{ margin: "26px 0 8px" }}>Final classification</h3>
           <div style={{ marginLeft: -16, marginRight: -16 }}>
             {order.map((did, i) => {
@@ -741,9 +1000,9 @@ function RoundSheet({ round, drivers, players, picks, scoring, me, onClose }) {
               const callers = (byPos[i + 1] || []).map((pid) => players[pid]).filter(Boolean);
               return (
                 <div key={did} className="trow" style={{ background: isDrawn ? "var(--raise)" : undefined }}>
-                  <div className="tp" style={{ color: isDrawn ? team.color : undefined }}>{i + 1}</div>
+                  <div className="tp" style={{ color: isDrawn ? teamColor(round.driver.team) : undefined }}>{i + 1}</div>
                   <div className="row" style={{ minWidth: 0 }}>
-                    <div style={{ width: 3, height: 22, background: t.color, borderRadius: 2, flex: "none" }} />
+                    <div style={{ width: 3, height: 22, background: teamColor(d.team), borderRadius: 2, flex: "none" }} />
                     {d.photo && <img className="mug" src={d.photo} alt="" loading="lazy" />}
                     <div className="stack" style={{ minWidth: 0 }}>
                       <div style={{ fontWeight: isDrawn ? 600 : 400 }}>{d.last}</div>
@@ -838,6 +1097,72 @@ async function disablePush() {
   }
 }
 
+/* Already granted (another browser, a reinstall, a previous visit): subscribe
+   silently. No prompt is needed once permission exists, so for returning people
+   notifications simply are on. */
+async function ensurePushIfAllowed() {
+  try {
+    if (!pushSupported() || Notification.permission !== "granted") return;
+    const reg = await navigator.serviceWorker.register("/sw.js");
+    await navigator.serviceWorker.ready;
+    if (await reg.pushManager.getSubscription()) return;
+    await enablePush();
+  } catch (e) { /* never block the app for this */ }
+}
+
+const SNOOZE_KEY = "gc_push_snoozed";
+const snoozed = () => {
+  try { return Number(localStorage.getItem(SNOOZE_KEY) || 0) > Date.now(); } catch { return false; }
+};
+const snooze = (days) => {
+  try { localStorage.setItem(SNOOZE_KEY, String(Date.now() + days * 86400000)); } catch (e) { /* private mode */ }
+};
+
+/** Asked for once, up front, instead of buried in a settings toggle. */
+function PushPrompt({ onDone }) {
+  const [state, setState] = useState("hidden");
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    if (!pushSupported()) return setState(isIOS() && !isStandalone() ? "ios" : "hidden");
+    if (Notification.permission !== "default") return setState("hidden");
+    if (snoozed()) return setState("hidden");
+    setState("ask");
+  }, []);
+
+  if (state === "hidden") return null;
+
+  if (state === "ios") {
+    return (
+      <div className="panel pad" style={{ borderTop: "none" }}>
+        <h3 style={{ marginBottom: 6 }}>Turn on notifications</h3>
+        <div className="meta" style={{ marginBottom: 12 }}>
+          Apple only allows these from the Home Screen. Tap share in Safari, choose
+          <b> Add to Home Screen</b>, then open Grid Call from the icon.
+        </div>
+        <button className="btn ghost" onClick={() => { snooze(7); setState("hidden"); }}>Not now</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="panel pad" style={{ borderTop: "none" }}>
+      <h3 style={{ marginBottom: 6 }}>Don't miss a call</h3>
+      <div className="meta" style={{ marginBottom: 12 }}>
+        A nudge three hours before calls close, and one when the result lands. Nothing else.
+      </div>
+      {err && <div className="meta" style={{ color: "var(--stop)", marginBottom: 10 }}>{err}</div>}
+      <button className="btn" onClick={async () => {
+        setErr("");
+        try { await enablePush(); setState("hidden"); onDone && onDone(); }
+        catch (e) { setErr(e.message); }
+      }}>Turn notifications on</button>
+      <button className="btn ghost" style={{ marginTop: 10 }}
+        onClick={() => { snooze(7); setState("hidden"); }}>Not now</button>
+    </div>
+  );
+}
+
 function NotificationSettings() {
   const [state, setState] = useState("checking");
   const [err, setErr] = useState("");
@@ -883,7 +1208,8 @@ function NotificationSettings() {
     <div style={{ marginTop: 22 }}>
       <h3 style={{ marginBottom: 6 }}>Notifications</h3>
       <div className="meta" style={{ marginBottom: 12 }}>
-        A nudge three hours before calls close if yours isn't in, and one when a result lands.
+        On by default. A nudge three hours before calls close if yours isn't in, one when
+        the result lands, and one if the official result moves the points.
       </div>
       {err && <div className="meta" style={{ color: "var(--stop)", marginBottom: 10 }}>{err}</div>}
       {state === "on" ? (
@@ -1098,6 +1424,66 @@ function Toggle({ label, hint, on, onChange }) {
   );
 }
 
+function Cell({ label, state }) {
+  const color = state === "official" ? "var(--go)"
+    : state === "provisional" ? "var(--caution)"
+    : state === "na" ? "var(--faint)" : "var(--line)";
+  const bg = state === "official" || state === "provisional" ? color : "transparent";
+  const fg = state === "official" || state === "provisional" ? "#06090F" : "var(--faint)";
+  return (
+    <span title={label + ": " + state} style={{
+      width: 22, height: 22, borderRadius: 3, display: "inline-flex",
+      alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 600,
+      background: bg, color: fg, border: "1px solid " + color,
+    }}>{state === "na" ? "–" : label}</span>
+  );
+}
+
+function Coverage({ rounds }) {
+  const now = Date.now();
+  const seen = rounds.filter((r) => r.locked || (r.qualiAt && new Date(r.qualiAt) <= now));
+  if (!seen.length) return <div className="meta">Nothing has run yet.</div>;
+  const cell = (order, provisional) => !order || !order.length ? "missing" : provisional ? "provisional" : "official";
+  return (
+    <>
+      {seen.slice().reverse().map((r) => (
+        <div key={r.round} className="spread" style={{ padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
+          <div className="stack" style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 14, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {ccToFlag(r.cc)} {r.name}
+            </div>
+            <div className="tiny">Round {r.round}</div>
+          </div>
+          <div className="row" style={{ gap: 5 }}>
+            <Cell label="Q" state={cell(r.quali, r.qualiProvisional)} />
+            <Cell label="S" state={r.sprintAt ? cell(r.sprint, false) : "na"} />
+            <Cell label="R" state={cell(r.result, r.provisional)} />
+          </div>
+        </div>
+      ))}
+      <div className="tiny" style={{ marginTop: 10 }}>
+        Q qualifying · S sprint · R race. Filled green is official, amber is provisional
+        from the live feed, outlined is still missing, dash means the weekend has none.
+      </div>
+    </>
+  );
+}
+
+function liveLine(l) {
+  if (!l || !l.at) return "Not run yet.";
+  const bits = [];
+  if (l.race) bits.push("race R" + l.race.round + " · " + l.race.drivers + " drivers");
+  if (l.quali) bits.push("qualifying R" + l.quali.round + " · " + l.quali.drivers + " drivers");
+  if (l.grid) bits.push("grid R" + l.grid.round + " · " + l.grid.drivers + " slots");
+  if (l.gridError) bits.push("grid error: " + l.gridError);
+  if (l.gridPending) bits.push(l.gridPending);
+  if (l.raceError) bits.push("race error: " + l.raceError);
+  if (l.qualiError) bits.push("qualifying error: " + l.qualiError);
+  if (l.idle) bits.push(l.idle);
+  return (bits.length ? bits.join(" · ") : "Nothing returned") +
+    " (" + new Date(l.at).toLocaleTimeString() + ")";
+}
+
 function AdminScreen({ state, onState }) {
   const me = state.me;
   const [scoring, setScoring] = useState(state.scoring);
@@ -1192,7 +1578,7 @@ function AdminScreen({ state, onState }) {
       {err && <div className="panel pad"><div className="meta" style={{ color: "var(--stop)" }}>{err}</div></div>}
 
       <div className="panel pad">
-        <h3 style={{ marginBottom: 4 }}>Race data</h3>
+        <h3 style={{ marginBottom: 4 }}>Official record (Jolpica)</h3>
         <div className="meta" style={{ marginBottom: 14 }}>
           Calendar, results, qualifying and driver portraits come from the Jolpica F1 API and Wikipedia,
           and refresh on their own every four hours. This runs it now, in the background.
@@ -1200,15 +1586,63 @@ function AdminScreen({ state, onState }) {
         <button className="btn" disabled={busy === "sync" || sync.busy} onClick={sync2}>
           {sync.busy ? "Fetching · " + (sync.step || "working") : "Sync now"}
         </button>
+        <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
+          <h3 style={{ marginBottom: 4 }}>Live feed (OpenF1)</h3>
+          <div className="meta" style={{ marginBottom: 12 }}>
+            Separate service from the sync above, with its own limits. Provisional
+            qualifying and race order, replaced by the official result when it lands.
+          </div>
+          <button className="btn ghost" disabled={busy === "live"}
+            onClick={() => run("live", async () => onState(await api("/admin/live", { method: "POST" })))}>
+            {busy === "live" ? "Checking" : "Check the live feed now"}
+          </button>
+          <div className="tiny" style={{ marginTop: 10 }}>{liveLine(state.liveState)}</div>
+        </div>
+
+        <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
+          <h3 style={{ marginBottom: 4 }}>Notifications</h3>
+          <div className="tiny">
+            {(() => {
+              const n = state.notifyState || {};
+              if (n.error) return n.error;
+              if (!n.at) return "Hasn't run yet.";
+              const l = n.last;
+              return (l ? (l.what === "nothing due" ? "Nothing due" : "Sent " + l.what + " to " + l.sent + (l.of ? " of " + l.of : "")) : "Checked")
+                + " at " + new Date(n.at).toLocaleTimeString() + ".";
+            })()}
+          </div>
+        </div>
+        {sync.cooldownUntil && sync.cooldownUntil > Date.now() && (
+          <div className="tiny" style={{ marginTop: 10, color: "var(--caution)" }}>
+            Rate-limited by Jolpica. Backing off until {new Date(sync.cooldownUntil).toLocaleTimeString()}.
+            Nothing is lost — it resumes on its own.
+          </div>
+        )}
         {sync.at && !sync.busy && (
           <div className="tiny" style={{ marginTop: 10 }}>
             {sync.ok === false
               ? "Last sync failed: " + sync.error
-              : "Last sync: " + (sync.schedule || 0) + " rounds, " + (sync.drivers || 0) + " drivers, "
-                + (sync.races || 0) + " results, " + (sync.qualis || 0) + " qualifyings, "
-                + (sync.sprints || 0) + " sprints, " + (sync.photos || 0) + " portraits."}
+              : "Held: " + ((sync.held && sync.held.races) || 0) + " results, "
+                + ((sync.held && sync.held.qualis) || 0) + " qualifyings, "
+                + ((sync.held && sync.held.sprints) || 0) + " sprints, "
+                + ((sync.held && sync.held.photos) || 0) + " portraits. "
+                + "Last run added " + (sync.races || 0) + "/" + (sync.qualis || 0) + "/" + (sync.sprints || 0) + "."}
           </div>
         )}
+        {sync.at && (
+          <div className="tiny" style={{ marginTop: 6 }}>
+            Last checked {new Date(sync.at).toLocaleTimeString()}
+            {sync.calendarAt ? " · calendar " + new Date(sync.calendarAt).toLocaleDateString() : ""}
+            {sync.driversAt ? " · drivers " + new Date(sync.driversAt).toLocaleDateString() : ""}
+            {" · " + state.drivers.filter((d) => d.active).length + "/" + state.drivers.length + " drivers in the pool"}
+          </div>
+        )}
+
+        <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--line)" }}>
+          <h3 style={{ marginBottom: 4 }}>What we hold</h3>
+          <div className="meta" style={{ marginBottom: 10 }}>Session by session, newest first.</div>
+          <Coverage rounds={state.rounds} />
+        </div>
       </div>
 
       <div className="pad">
@@ -1234,7 +1668,7 @@ function AdminScreen({ state, onState }) {
         {state.drivers.map((d) => (
           <div key={d.id} className="spread" style={{ padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
             <div className="row" style={{ minWidth: 0 }}>
-              <span style={{ width: 3, height: 20, background: (TEAMS[d.team] || {}).color || "#4A5768", borderRadius: 2, flex: "none" }} />
+              <span style={{ width: 3, height: 20, background: teamColor(d.team), borderRadius: 2, flex: "none" }} />
               {d.photo && <img className="mug" src={d.photo} alt="" loading="lazy" />}
               <div className="stack" style={{ minWidth: 0 }}>
                 <div style={{ opacity: d.active ? 1 : 0.45 }}>{d.first} {d.last}</div>
@@ -1295,8 +1729,12 @@ function AdminScreen({ state, onState }) {
         {started.slice().reverse().map((r) => (
           <div key={r.round} className="spread" style={{ padding: "11px 0", borderBottom: "1px solid var(--line)" }}>
             <div className="stack" style={{ minWidth: 0 }}>
-              <div>{r.flag} {r.name}</div>
-              <div className="tiny">{r.result ? r.result.order.length + " positions" : "no result yet"}</div>
+              <div>{ccToFlag(r.cc)} {r.name}</div>
+              <div className="tiny">
+                {r.result && r.result.length
+                  ? r.result.length + " positions" + (r.provisional ? " · provisional" : " · official")
+                  : "no result yet"}
+              </div>
             </div>
             <button className="btn ghost sm" onClick={() => { setManual(r.round); setManualText(""); }}>Type it in</button>
           </div>
@@ -1309,6 +1747,13 @@ function AdminScreen({ state, onState }) {
         {state.players.map((p) => (
           <div key={p.id} className="spread" style={{ padding: "9px 0", borderBottom: "1px solid var(--line)" }}>
             <div className="row"><Avatar player={p} /><div>{p.name}{p.isAdmin ? " · organiser" : ""}</div></div>
+            <div className="row" style={{ gap: 6 }}>
+            {p.id !== me.id && (
+              <button className="btn ghost sm" onClick={() => run("pw", async () => {
+                const r = await api("/admin/password", { method: "POST", body: { id: p.id } });
+                setNote("New password for " + p.name + ": " + r.password + " — give it to them, they can change it in their profile.");
+              })}>Reset password</button>
+            )}
             {p.id !== me.id && (
               <button className={"btn sm " + (confirming === "rm" + p.id ? "danger" : "ghost")}
                 onClick={() => armed("rm" + p.id, () => run("rm", async () => {
@@ -1317,6 +1762,7 @@ function AdminScreen({ state, onState }) {
                 {confirming === "rm" + p.id ? "Confirm" : "Remove"}
               </button>
             )}
+            </div>
           </div>
         ))}
       </div>
@@ -1350,7 +1796,7 @@ function AdminScreen({ state, onState }) {
 
 /* ===================== app ===================== */
 
-export default function App() {
+function GridCall() {
   const [st, setSt] = useState(null);
   const [phase, setPhase] = useState("loading");
   const [fatal, setFatal] = useState("");
@@ -1377,11 +1823,29 @@ export default function App() {
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   }, []);
 
-  /* Quiet refresh so everyone sees calls and results land. */
+  /* Signed in and already permitted: make sure a subscription exists. */
+  useEffect(() => { if (st && st.me) ensurePushIfAllowed(); }, [st && st.me && st.me.id]);
+
+  /* Quiet refresh. Asks /pulse, which is a single row, and only downloads the
+     full state when something has actually changed. Polling /state directly
+     read the whole database every 25 seconds, for every open tab. */
+  const rev = useRef(null);
   useEffect(() => {
     if (phase !== "ready") return;
-    const t = setInterval(() => { if (!document.hidden) load().catch(() => {}); }, 25000);
-    return () => clearInterval(t);
+    let stop = false;
+    const tick = async () => {
+      if (stop || document.hidden) return;
+      try {
+        const p = await api("/pulse");
+        if (rev.current === null) { rev.current = p.rev; return; }
+        if (p.rev !== rev.current) { rev.current = p.rev; await load(); }
+      } catch (e) { /* offline; try again next tick */ }
+    };
+    const t = setInterval(tick, 30000);
+    /* Catch up immediately when the tab comes back, rather than waiting. */
+    const onShow = () => { if (!document.hidden) tick(); };
+    document.addEventListener("visibilitychange", onShow);
+    return () => { stop = true; clearInterval(t); document.removeEventListener("visibilitychange", onShow); };
   }, [phase, load]);
 
   const driverById = useMemo(
@@ -1397,7 +1861,7 @@ export default function App() {
       flag: ccToFlag(r.cc),
       driver: driverById[r.driverId] || null,
       result: r.result ? { order: r.result } : null,
-      pickMap: locked ? Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, { pos: v }])) : {},
+      pickMap: locked ? raw : {},
       callCount: locked ? Object.keys(raw).length : raw.count || 0,
       myPick: locked ? (st.me ? raw[st.me.id] ?? null : null) : raw.mine ?? null,
     };
@@ -1409,12 +1873,20 @@ export default function App() {
     return m;
   }, [rounds]);
 
-  const activeRound = useMemo(() => rounds.find((r) => !r.result) || null, [rounds]);
-  const lastDone = useMemo(() => [...rounds].reverse().find((r) => r.result) || null, [rounds]);
+  /* The round you can still call. Kept separate from the one being raced, so a
+     missing official result can never block the next round's calls. */
+  const activeRound = useMemo(() => rounds.find((r) => !r.locked) || null, [rounds]);
+  /* Locked, no official result: under way, or waiting on the stewards. */
+  const liveRound = useMemo(() =>
+    [...rounds].reverse().find((r) => r.locked && (!r.result || r.provisional)) || null, [rounds]);
+  const lastDone = useMemo(() =>
+    [...rounds].reverse().find((r) => r.result && !r.provisional) || null, [rounds]);
 
+  /* Throws on failure so the race screen can show it inline and offer a retry. */
   const savePick = useCallback(async (round, calls) => {
-    try { setSt(await api("/pick", { method: "POST", body: { round, ...calls } })); return true; }
-    catch (e) { alert(e.message); return false; }
+    setSt(await api("/pick", { method: "POST", body: { round, ...calls } }));
+    try { rev.current = (await api("/pulse")).rev; } catch (e) { rev.current = null; }
+    return true;
   }, []);
 
   if (phase === "loading") {
@@ -1444,6 +1916,11 @@ export default function App() {
         <div className="meta">{flagText}</div>
       </div>
 
+      {tab === "race" && st.me && <PushPrompt />}
+      {tab === "race" && !needsSetup && !activeRound && liveRound && (
+        <LiveRound round={liveRound} players={playersById} me={st.me}
+          scoring={st.scoring} onOpen={setOpenRound} />
+      )}
       {tab === "race" && (needsSetup ? (
         <Empty line="No calendar yet. An organiser needs to open Settings and press Sync now." />
       ) : (
@@ -1453,10 +1930,14 @@ export default function App() {
           callCount={activeRound ? activeRound.callCount : 0}
           myPick={activeRound ? activeRound.myPick : null}
           modes={st.modes || {}}
-          recap={lastDone && (
-            <Recap round={lastDone} drivers={st.drivers} players={playersById}
-              standings={st.standings} scoring={st.scoring} me={st.me} onOpen={setOpenRound} />
-          )}
+          scoring={st.scoring}
+          recap={liveRound
+            ? <LiveRound round={liveRound} players={playersById} me={st.me}
+                scoring={st.scoring} onOpen={setOpenRound} />
+            : lastDone && (
+              <Recap round={lastDone} drivers={st.drivers} players={playersById}
+                standings={st.standings} scoring={st.scoring} me={st.me} onOpen={setOpenRound} />
+            )}
           onPick={savePick} now={now}
           onOpenRound={setOpenRound} onNeedProfile={() => setTab("you")}
           onNeedFavourite={() => setTab("you")}
@@ -1470,7 +1951,7 @@ export default function App() {
 
       {sheetRound && (
         <RoundSheet round={sheetRound} drivers={st.drivers} players={playersById}
-          picks={sheetRound.pickMap} scoring={st.scoring} me={st.me}
+          picks={sheetRound.pickMap} scoring={st.scoring} modes={st.modes || {}} me={st.me}
           onClose={() => setOpenRound(null)} />
       )}
 
@@ -1485,10 +1966,37 @@ export default function App() {
   );
 }
 
+export default function App() {
+  return <Boundary><GridCall /></Boundary>;
+}
+
+class Boundary extends React.Component {
+  constructor(p) { super(p); this.state = { err: null }; }
+  static getDerivedStateFromError(err) { return { err }; }
+  componentDidCatch(err) { console.error("Grid Call crashed:", err); }
+  render() {
+    if (!this.state.err) return this.props.children;
+    return (
+      <Shell>
+        <div className="pad" style={{ paddingTop: 60 }}>
+          <h2>Something broke</h2>
+          <div className="meta" style={{ margin: "8px 0 16px" }}>
+            The page hit an error and stopped. Reloading usually clears it.
+          </div>
+          <div className="tiny" style={{ marginBottom: 18, wordBreak: "break-word" }}>
+            {String(this.state.err && this.state.err.message)}
+          </div>
+          <button className="btn" onClick={() => window.location.reload()}>Reload</button>
+        </div>
+      </Shell>
+    );
+  }
+}
+
 function Shell({ children }) {
   return (
     <div className="gc">
-      <style>{CSS}</style>
+      <style>{CSS + TEAM_CSS}</style>
       <div className="wrap">{children}</div>
     </div>
   );

@@ -128,9 +128,17 @@ async function getSettings(env) {
     scoring: { ...DEFAULT_SCORING, ...(out.scoring || {}) },
     modes: { ...DEFAULT_MODES, ...(out.modes || {}) },
     syncState: out.syncState || {},
+    liveState: out.liveState || {},
+    notifyState: out.notifyState || {},
+    notified: out.notified || {},
     seed: Number(out.seed) || 0,
     startRound: Number(out.startRound) || 0,
   };
+}
+
+/** Bumped by anything that changes game data, so /pulse is one row. */
+async function bump(env) {
+  try { await putSetting(env, "rev", Date.now()); } catch (e) { /* never fail a write for this */ }
 }
 
 async function putSetting(env, k, v) {
@@ -144,10 +152,17 @@ async function putSetting(env, k, v) {
    Browsers refuse to set that header, which is why these calls live here.
    Routes are lower-case and case-sensitive, and the default page size is 30,
    so every call passes an explicit limit. */
-async function jolpica(env, path) {
+class RateLimited extends Error {}
+
+async function jolpica(env, path, ttl = 600) {
   const res = await fetch("https://api.jolpi.ca/ergast/f1/" + path, {
     headers: { "User-Agent": env.USER_AGENT || "GridCall/1.0", Accept: "application/json" },
+    /* Cache at Cloudflare's edge. Repeated syncs then cost Jolpica nothing,
+       which matters because Workers share egress IPs and therefore share
+       Jolpica's per-IP budget with everyone else on the platform. */
+    cf: { cacheTtl: ttl, cacheEverything: true },
   });
+  if (res.status === 429) throw new RateLimited("Jolpica is rate-limiting us (429)");
   if (!res.ok) throw new Error("Jolpica returned " + res.status + " for " + path);
   return res.json();
 }
@@ -288,9 +303,10 @@ async function syncResult(env, season, round) {
   const results = data?.MRData?.RaceTable?.Races?.[0]?.Results || [];
   if (!results.length) return 0;
   await env.DB.prepare("DELETE FROM results WHERE season = ?1 AND round = ?2").bind(Number(season), Number(round)).run();
+  await bump(env);
   await env.DB.batch(results.map((r) =>
-    env.DB.prepare("INSERT INTO results (season, round, pos, driver_id) VALUES (?1, ?2, ?3, ?4)")
-      .bind(Number(season), Number(round), Number(r.position), r.Driver.driverId)
+    env.DB.prepare("INSERT INTO results (season, round, pos, driver_id, provisional, grid) VALUES (?1, ?2, ?3, ?4, 0, ?5)")
+      .bind(Number(season), Number(round), Number(r.position), r.Driver.driverId, Number(r.grid) || null)
   ));
   return results.length;
 }
@@ -313,7 +329,7 @@ async function syncQuali(env, season, round) {
   if (!q.length) return 0;
   await env.DB.prepare("DELETE FROM quali WHERE season = ?1 AND round = ?2").bind(Number(season), Number(round)).run();
   await env.DB.batch(q.map((r) =>
-    env.DB.prepare("INSERT INTO quali (season, round, pos, driver_id) VALUES (?1, ?2, ?3, ?4)")
+    env.DB.prepare("INSERT INTO quali (season, round, pos, driver_id, provisional) VALUES (?1, ?2, ?3, ?4, 0)")
       .bind(Number(season), Number(round), Number(r.position), r.Driver.driverId)
   ));
   return q.length;
@@ -321,18 +337,37 @@ async function syncQuali(env, season, round) {
 
 /** Pull anything missing. Runs in the background; progress lands in settings. */
 async function syncAll(env, season) {
+  const prev = (await getSettings(env)).syncState || {};
   const note = async (o) => putSetting(env, "syncState", { at: Date.now(), ...o });
-  try {
-    await note({ busy: true, step: "calendar" });
-    const schedule = await syncSchedule(env, season);
 
-    await note({ busy: true, step: "drivers" });
-    const drivers = await syncDrivers(env, season);
+  /* Jolpica told us to back off. Respect it rather than hammering. */
+  if (prev.cooldownUntil && Date.now() < prev.cooldownUntil) {
+    await note({ ...prev, busy: false, ok: false,
+      error: "Backing off until " + new Date(prev.cooldownUntil).toISOString() + " after a 429." });
+    return;
+  }
+
+  const DAY = 24 * 3600 * 1000;
+  try {
+    /* The calendar and the entry list change at most once a day. */
+    let schedule = prev.schedule || 0;
+    if (!prev.calendarAt || Date.now() - prev.calendarAt > DAY) {
+      await note({ ...prev, busy: true, step: "calendar" });
+      schedule = await syncSchedule(env, season);
+      prev.calendarAt = Date.now();
+    }
+
+    let drivers = prev.drivers || 0;
+    if (!prev.driversAt || Date.now() - prev.driversAt > DAY) {
+      await note({ ...prev, busy: true, step: "drivers" });
+      drivers = await syncDrivers(env, season);
+      prev.driversAt = Date.now();
+    }
 
     await note({ busy: true, step: "results" });
     const due = await env.DB.prepare(
       `SELECT round FROM rounds WHERE season = ?1 AND start <= ?2
-         AND round NOT IN (SELECT round FROM results WHERE season = ?1)
+         AND round NOT IN (SELECT round FROM results WHERE season = ?1 AND provisional = 0)
        ORDER BY round`
     ).bind(Number(season), new Date().toISOString()).all();
     let races = 0;
@@ -341,11 +376,19 @@ async function syncAll(env, season) {
     }
 
     await note({ busy: true, step: "qualifying" });
+    /* Qualifying happens a day or two before the race, so gating on the race
+       start meant today's qualifying was never fetched until tomorrow.
+       Where the calendar gives no qualifying time, fall back to the day before. */
+    const nowISO = new Date().toISOString();
+    const tomorrowISO = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
     const qdue = await env.DB.prepare(
-      `SELECT round FROM rounds WHERE season = ?1 AND start <= ?2
-         AND round NOT IN (SELECT round FROM quali WHERE season = ?1)
+      `SELECT round FROM rounds
+       WHERE season = ?1
+         AND ( (quali_at IS NOT NULL AND quali_at <= ?2)
+            OR (quali_at IS NULL AND start <= ?3) )
+         AND round NOT IN (SELECT round FROM quali WHERE season = ?1 AND provisional = 0)
        ORDER BY round`
-    ).bind(Number(season), new Date().toISOString()).all();
+    ).bind(Number(season), nowISO, tomorrowISO).all();
     let qualis = 0;
     for (const row of qdue.results || []) {
       try { if (await syncQuali(env, season, row.round)) qualis++; } catch { /* skip */ }
@@ -373,9 +416,27 @@ async function syncAll(env, season) {
        ) WHERE season = ?1`
     ).bind(Number(season)).run();
 
-    await note({ busy: false, ok: true, schedule, drivers, races, qualis, sprints, photos });
+    const held = await env.DB.prepare(
+      `SELECT
+         (SELECT COUNT(DISTINCT round) FROM results WHERE season = ?1) AS races,
+         (SELECT COUNT(DISTINCT round) FROM quali   WHERE season = ?1) AS qualis,
+         (SELECT COUNT(DISTINCT round) FROM sprint  WHERE season = ?1) AS sprints,
+         (SELECT COUNT(*) FROM drivers WHERE season = ?1 AND photo IS NOT NULL) AS photos`
+    ).bind(Number(season)).first();
+    await note({
+      busy: false, ok: true, schedule, drivers,
+      races, qualis, sprints, photos,          // fetched this run
+      held: held || {},                        // total in the database
+      calendarAt: prev.calendarAt, driversAt: prev.driversAt,
+    });
   } catch (e) {
-    await note({ busy: false, ok: false, error: String(e.message || e) });
+    /* A 429 means wait, not retry. Half an hour is well inside their window. */
+    const limited = e instanceof RateLimited;
+    await note({
+      ...prev, busy: false, ok: false,
+      error: String(e.message || e),
+      cooldownUntil: limited ? Date.now() + 30 * 60 * 1000 : undefined,
+    });
   }
 }
 
@@ -389,6 +450,228 @@ const CC_BY_COUNTRY = {
 };
 
 const countryToCC = (c) => CC_BY_COUNTRY[String(c || "").toLowerCase()] || "";
+
+/* ---------- OpenF1 (live and near-live results) ---------- */
+
+/* Jolpica publishes the official classification hours after the flag, once the
+   stewards are done. OpenF1 carries the running order within seconds. We use
+   OpenF1 for a provisional result and let Jolpica overwrite it when it lands,
+   because penalties applied after the race change the finishing order.
+
+   OpenF1's free tier is historical only: data becomes free 30 minutes after a
+   session ends. Setting OPENF1_TOKEN (their €9.90/month sponsor tier) makes the
+   same code path work during the race instead. */
+async function openf1(env, path) {
+  const headers = { Accept: "application/json" };
+  if (env.OPENF1_TOKEN) headers.Authorization = "Bearer " + env.OPENF1_TOKEN;
+  const res = await fetch("https://api.openf1.org/v1/" + path, { headers });
+  if (!res.ok) throw new Error("OpenF1 returned " + res.status);
+  return res.json();
+}
+
+/** Find the OpenF1 race session that matches one of our rounds, by date. */
+async function openf1Session(env, season, when, type) {
+  const list = await openf1(env, "sessions?year=" + season + "&session_type=" + type);
+  let pool = list || [];
+  /* A sprint weekend has two qualifying sessions. Only the grid-setting one. */
+  if (type === "Qualifying") {
+    const main = pool.filter((s) => String(s.session_name || "").toLowerCase() === "qualifying");
+    if (main.length) pool = main;
+  }
+  const target = new Date(when).getTime();
+  const near = pool.filter((s) => Math.abs(new Date(s.date_start) - target) < 30 * 3600 * 1000);
+  return near.sort((a, b) =>
+    Math.abs(new Date(a.date_start) - target) - Math.abs(new Date(b.date_start) - target))[0] || null;
+}
+
+/** Current running order, as driverIds we recognise. */
+async function openf1Order(env, season, sessionKey) {
+  const [entries, ours] = await Promise.all([
+    openf1(env, "drivers?session_key=" + sessionKey),
+    env.DB.prepare("SELECT id, code, last, no FROM drivers WHERE season = ?1").bind(Number(season)).all(),
+  ]);
+  if (!entries?.length) return [];
+
+  /* session_result is the classification proper. Older deployments don't have
+     it, so fall back to the position time series and take each driver's last. */
+  const latest = new Map();
+  try {
+    const res = await openf1(env, "session_result?session_key=" + sessionKey);
+    for (const r of res || []) {
+      if (r.position) latest.set(r.driver_number, { position: r.position, date: "z" });
+    }
+  } catch { /* fall through */ }
+  if (!latest.size) {
+    const positions = await openf1(env, "position?session_key=" + sessionKey);
+    if (!positions?.length) return [];
+    for (const p of positions) {
+      const prev = latest.get(p.driver_number);
+      if (!prev || new Date(p.date) > new Date(prev.date)) latest.set(p.driver_number, p);
+    }
+  }
+
+  const norm = (v) => String(v || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z]/g, "");
+  const byNumber = new Map(), byCode = new Map(), byLast = new Map();
+  for (const d of ours.results || []) {
+    if (d.no) byNumber.set(Number(d.no), d.id);
+    if (d.code) byCode.set(norm(d.code), d.id);
+    byLast.set(norm(d.last), d.id);
+  }
+
+  const rows = [];
+  for (const [num, p] of latest) {
+    const e = entries.find((x) => x.driver_number === num) || {};
+    const id = byNumber.get(Number(num))
+      || byCode.get(norm(e.name_acronym))
+      || byLast.get(norm(e.last_name))
+      || byLast.get(norm(String(e.full_name || "").split(" ").pop()));
+    if (id) rows.push({ id, pos: p.position });
+  }
+  rows.sort((a, b) => a.pos - b.pos);
+  /* Renumber, so a missing driver doesn't leave a gap in the classification. */
+  return rows.map((r) => r.id);
+}
+
+/** Like openf1(), but a 404 means "nothing published yet" rather than an error. */
+async function openf1Soft(env, path) {
+  const headers = { Accept: "application/json" };
+  if (env.OPENF1_TOKEN) headers.Authorization = "Bearer " + env.OPENF1_TOKEN;
+  const res = await fetch("https://api.openf1.org/v1/" + path, { headers });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error("OpenF1 returned " + res.status + " for " + path);
+  return res.json();
+}
+
+/** The starting grid for a race that hasn't run yet. Empty until published. */
+async function openf1Grid(env, season, sessionKey) {
+  const [rows, entries, ours] = await Promise.all([
+    openf1Soft(env, "starting_grid?session_key=" + sessionKey),
+    openf1Soft(env, "drivers?session_key=" + sessionKey),
+    env.DB.prepare("SELECT id, code, last, no FROM drivers WHERE season = ?1").bind(Number(season)).all(),
+  ]);
+  if (!rows?.length) return [];
+  const norm = (v) => String(v || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z]/g, "");
+  const byNumber = new Map(), byCode = new Map(), byLast = new Map();
+  for (const d of ours.results || []) {
+    if (d.no) byNumber.set(Number(d.no), d.id);
+    if (d.code) byCode.set(norm(d.code), d.id);
+    byLast.set(norm(d.last), d.id);
+  }
+  const out = [];
+  for (const r of rows) {
+    const e = (entries || []).find((x) => x.driver_number === r.driver_number) || {};
+    const id = byNumber.get(Number(r.driver_number))
+      || byCode.get(norm(e.name_acronym))
+      || byLast.get(norm(e.last_name));
+    if (id && r.position) out.push({ id, pos: Number(r.position) });
+  }
+  return out;
+}
+
+/** Runs every minute. Does nothing unless a session has just happened. */
+async function liveTick(env, season) {
+  if (!env.OPENF1_ENABLED || env.OPENF1_ENABLED === "false") return;
+  const now = Date.now();
+  const iso = (ms) => new Date(ms).toISOString();
+  const state = {};
+
+  /* --- the race: from lights out to five hours after --- */
+  const race = await env.DB.prepare(
+    `SELECT round, start FROM rounds
+     WHERE season = ?1 AND start <= ?2 AND start >= ?3
+       AND round NOT IN (SELECT round FROM results WHERE season = ?1 AND provisional = 0)
+     ORDER BY round DESC LIMIT 1`
+  ).bind(Number(season), iso(now), iso(now - 5 * 3600 * 1000)).first();
+
+  if (race) {
+    try {
+      const session = await openf1Session(env, season, race.start, "Race");
+      const order = session ? await openf1Order(env, season, session.session_key) : [];
+      if (order.length >= 5) {
+        await env.DB.prepare("DELETE FROM results WHERE season = ?1 AND round = ?2 AND provisional = 1")
+          .bind(Number(season), race.round).run();
+        await env.DB.batch(order.map((did, i) =>
+          env.DB.prepare("INSERT OR REPLACE INTO results (season, round, pos, driver_id, provisional) VALUES (?1, ?2, ?3, ?4, 1)")
+            .bind(Number(season), race.round, i + 1, did)
+        ));
+        state.race = { round: race.round, drivers: order.length };
+      }
+    } catch (e) { state.raceError = String(e.message || e); }
+  }
+
+  /* --- qualifying: a wider window, because it is the day before the race --- */
+  const quali = await env.DB.prepare(
+    `SELECT round, start, COALESCE(quali_at, start) AS at FROM rounds
+     WHERE season = ?1
+       AND COALESCE(quali_at, start) <= ?2
+       AND COALESCE(quali_at, start) >= ?3
+       AND round NOT IN (SELECT round FROM quali WHERE season = ?1 AND provisional = 0)
+       AND round NOT IN (
+         SELECT round FROM quali WHERE season = ?1 GROUP BY round HAVING COUNT(*) >= 15
+       )
+     ORDER BY round DESC LIMIT 1`
+  ).bind(Number(season), iso(now), iso(now - 30 * 3600 * 1000)).first();
+
+  if (quali) {
+    try {
+      const session = await openf1Session(env, season, quali.at, "Qualifying");
+      const order = session ? await openf1Order(env, season, session.session_key) : [];
+      if (order.length >= 5) {
+        await env.DB.prepare("DELETE FROM quali WHERE season = ?1 AND round = ?2 AND provisional = 1")
+          .bind(Number(season), quali.round).run();
+        await env.DB.batch(order.map((did, i) =>
+          env.DB.prepare("INSERT OR REPLACE INTO quali (season, round, pos, driver_id, provisional) VALUES (?1, ?2, ?3, ?4, 1)")
+            .bind(Number(season), quali.round, i + 1, did)
+        ));
+        state.quali = { round: quali.round, drivers: order.length };
+      }
+    } catch (e) { state.qualiError = String(e.message || e); }
+
+
+  }
+
+  /* --- the starting grid: its own condition, because qualifying may already
+         be stored and skipped while the grid is still unpublished --- */
+  const gridDue = await env.DB.prepare(
+    `SELECT round, start FROM rounds
+     WHERE season = ?1
+       AND COALESCE(quali_at, start) <= ?2
+       AND start >= ?3
+       AND round NOT IN (SELECT round FROM grid WHERE season = ?1)
+     ORDER BY round DESC LIMIT 1`
+  ).bind(Number(season), iso(now), iso(now - 5 * 3600 * 1000)).first();
+
+  if (gridDue) {
+    try {
+      /* Published against the race session; fall back to qualifying's. */
+      let slots = [];
+      const tried = [];
+      for (const type of ["Race", "Qualifying"]) {
+        const sess = await openf1Session(env, season, gridDue.start, type);
+        if (!sess) { tried.push(type + ": no session found"); continue; }
+        tried.push(type + " " + sess.session_key);
+        slots = await openf1Grid(env, season, sess.session_key);
+        if (slots.length) break;
+      }
+      if (slots.length >= 5) {
+        await env.DB.prepare("DELETE FROM grid WHERE season = ?1 AND round = ?2")
+          .bind(Number(season), gridDue.round).run();
+        await env.DB.batch(slots.map((g) =>
+          env.DB.prepare("INSERT OR REPLACE INTO grid (season, round, driver_id, pos) VALUES (?1, ?2, ?3, ?4)")
+            .bind(Number(season), gridDue.round, g.id, g.pos)
+        ));
+        state.grid = { round: gridDue.round, drivers: slots.length };
+      } else {
+        state.gridPending = "Grid for R" + gridDue.round + " not published by OpenF1 yet (tried "
+          + tried.join(", ") + "). It fills in from the official results after the race.";
+      }
+    } catch (e) { state.gridError = String(e.message || e); }
+  }
+
+  if (!race && !quali && !gridDue) state.idle = "No session in the last few hours.";
+  if (state.race || state.quali || state.grid) await bump(env);
+  await putSetting(env, "liveState", { at: now, ...state });
+}
 
 /* ---------- web push ---------- */
 
@@ -466,45 +749,76 @@ async function pendingNotice(env, season, meId) {
   return { title: "Grid Call", body: "Something has changed.", tag: "general" };
 }
 
-/** Cron decides who to nudge. Each nudge is sent once, tracked in settings. */
+/** Cron decides who to nudge. Each nudge is sent once, tracked in settings.
+    Deliberately built from small targeted queries: this runs every minute, and
+    calling buildState here read every row of every table 1440 times a day. */
 async function runNotifications(env, season) {
-  if (!env.VAPID_PRIVATE_JWK) return;
+  const state = {};
+  if (!env.VAPID_PRIVATE_JWK) {
+    await putSetting(env, "notified", (await getSettings(env)).notified || {});
+    await putSetting(env, "notifyState", { at: Date.now(), error: "VAPID keys are not set." });
+    return;
+  }
   const cfg = await getSettings(env);
   const done = cfg.notified || {};
-  const st = await buildState(env, season, null);
   const now = Date.now();
   let changed = false;
 
   /* Three hours before lights out, nudge whoever hasn't called. */
-  const next = st.rounds.find((r) => !r.locked);
+  const next = await env.DB.prepare(
+    "SELECT round, start FROM rounds WHERE season = ?1 AND start > ?2 ORDER BY round LIMIT 1"
+  ).bind(season, new Date(now).toISOString()).first();
+
   if (next) {
     const hrs = (new Date(next.start) - now) / 3600000;
     const key = "call-" + next.round;
     if (hrs > 0 && hrs <= 3 && !done[key]) {
-      const q = await env.DB.prepare(
-        "SELECT player_id FROM picks WHERE season = ?1 AND round = ?2 AND pos IS NOT NULL"
+      const silentQ = await env.DB.prepare(
+        `SELECT p.id FROM players p
+         WHERE NOT EXISTS (
+           SELECT 1 FROM picks k
+           WHERE k.season = ?1 AND k.round = ?2 AND k.player_id = p.id AND k.pos IS NOT NULL
+         )`
       ).bind(season, next.round).all();
-      const called = new Set((q.results || []).map((r) => r.player_id));
-      const silent = st.players.filter((p) => !called.has(p.id)).map((p) => p.id);
-      await pushTo(env, silent);
+      const silent = (silentQ.results || []).map((r) => r.id);
+      const sent = await pushTo(env, silent);
       done[key] = now; changed = true;
+      state.last = { at: now, what: key, sent, of: silent.length };
     }
   }
 
-  /* And tell everyone when a result lands. */
-  const fresh = [...st.rounds].reverse().find((r) => r.result);
-  if (fresh) {
-    const key = "result-" + fresh.round;
-    if (!done[key]) {
-      await pushTo(env, st.players.map((p) => p.id));
-      done[key] = now; changed = true;
+  /* A result landing, and again when the official one moves the drawn driver. */
+  const fresh = await env.DB.prepare(
+    `SELECT r.round, r.drawn,
+            (SELECT pos FROM results x WHERE x.season = ?1 AND x.round = r.round AND x.driver_id = r.drawn) AS at,
+            (SELECT MAX(provisional) FROM results x WHERE x.season = ?1 AND x.round = r.round) AS prov
+     FROM rounds r
+     WHERE r.season = ?1 AND EXISTS (SELECT 1 FROM results x WHERE x.season = ?1 AND x.round = r.round)
+     ORDER BY r.round DESC LIMIT 1`
+  ).bind(season).first();
+
+  if (fresh && fresh.at) {
+    const key = (fresh.prov ? "result-prov-" : "result-final-") + fresh.round;
+    const posKey = "pos-" + fresh.round;
+    /* No change to where the drawn driver finished means no points moved. */
+    const unchanged = !fresh.prov && done[posKey] === fresh.at;
+    if (!done[key] && !unchanged) {
+      const all = await env.DB.prepare("SELECT id FROM players").all();
+      const sent = await pushTo(env, (all.results || []).map((r) => r.id));
+      state.last = { at: now, what: key, sent };
     }
+    if (!done[key]) { done[key] = now; changed = true; }
+    if (done[posKey] !== fresh.at) { done[posKey] = fresh.at; changed = true; }
   }
 
   if (changed) {
-    for (const k of Object.keys(done)) if (now - done[k] > 30 * 86400_000) delete done[k];
+    for (const k of Object.keys(done)) {
+      if (typeof done[k] === "number" && done[k] > 1e12 && now - done[k] > 30 * 86400_000) delete done[k];
+    }
     await putSetting(env, "notified", done);
   }
+  if (!state.last) state.last = { at: now, what: "nothing due" };
+  await putSetting(env, "notifyState", { at: now, ...state });
 }
 
 /* ---------- the game model ---------- */
@@ -529,11 +843,35 @@ function shuffled(arr, seed) {
   return a;
 }
 
-/** Every driver comes up once before any repeats; each new pass reshuffles. */
-function drawFor(driverIds, seed, n) {
-  if (!driverIds.length) return null;
-  const cycle = Math.floor(n / driverIds.length);
-  return shuffled(driverIds, (seed + cycle * 7919) >>> 0)[n % driverIds.length];
+/** The shuffled order for a cycle. */
+function bagFor(driverIds, seed, cycle) {
+  return shuffled(driverIds, (seed + cycle * 7919) >>> 0);
+}
+
+/**
+ * Assign a driver to each round in order, never repeating within a cycle.
+ *
+ * Taking shuffled(pool)[n] directly was not enough: rounds already run are
+ * frozen, while later ones were recomputed from the live pool, and the pool
+ * changes whenever a driver's active flag flips. A different shuffle could
+ * then hand a later round a driver already frozen to an earlier one. So the
+ * used set is checked explicitly rather than assumed.
+ */
+function assignDraw(pool, seed, inPlay) {
+  const n = pool.length;
+  const out = [];
+  let used = new Set();
+  for (let i = 0; i < inPlay.length; i++) {
+    if (n && i % n === 0) used = new Set();
+    const frozen = inPlay[i].drawn;
+    if (frozen) { out.push(frozen); used.add(frozen); continue; }
+    if (!n) { out.push(null); continue; }
+    const bag = bagFor(pool, seed, Math.floor(i / n));
+    const pick = bag.find((d) => !used.has(d)) || bag[i % n];
+    out.push(pick);
+    used.add(pick);
+  }
+  return out;
 }
 
 function scoreFor(guess, actual, s) {
@@ -548,14 +886,18 @@ function scoreFor(guess, actual, s) {
 /** Everything the app needs, assembled once. */
 async function buildState(env, season, meId) {
   const cfg = await getSettings(env);
-  const [playersQ, driversQ, roundsQ, resultsQ, qualiQ, sprintQ, picksQ] = await Promise.all([
+  /* Rounds before the game started are never shown or scored, so don't read
+     them. On a season joined at round 16 that is two thirds of the rows. */
+  const from = cfg.startRound || 0;
+  const [playersQ, driversQ, roundsQ, resultsQ, qualiQ, gridQ, sprintQ, picksQ] = await Promise.all([
     env.DB.prepare("SELECT id, name, photo, color, favourite, is_admin FROM players ORDER BY joined").all(),
     env.DB.prepare("SELECT id, first, last, code, no, team, photo, wiki, active, starts FROM drivers WHERE season = ?1 ORDER BY id").bind(season).all(),
-    env.DB.prepare("SELECT round, name, circuit, cc, start, quali_at, sprint_at FROM rounds WHERE season = ?1 ORDER BY round").bind(season).all(),
-    env.DB.prepare("SELECT round, pos, driver_id FROM results WHERE season = ?1 ORDER BY round, pos").bind(season).all(),
-    env.DB.prepare("SELECT round, pos, driver_id FROM quali WHERE season = ?1 ORDER BY round, pos").bind(season).all(),
-    env.DB.prepare("SELECT round, pos, driver_id FROM sprint WHERE season = ?1 ORDER BY round, pos").bind(season).all(),
-    env.DB.prepare("SELECT round, player_id, pos, fav_pos, pole_driver, sprint_pos FROM picks WHERE season = ?1").bind(season).all(),
+    env.DB.prepare("SELECT round, name, circuit, cc, start, quali_at, sprint_at, drawn FROM rounds WHERE season = ?1 ORDER BY round").bind(season).all(),
+    env.DB.prepare("SELECT round, pos, driver_id, provisional, grid FROM results WHERE season = ?1 AND round >= ?2 ORDER BY round, pos").bind(season, from).all(),
+    env.DB.prepare("SELECT round, pos, driver_id, provisional FROM quali WHERE season = ?1 AND round >= ?2 ORDER BY round, pos").bind(season, from).all(),
+    env.DB.prepare("SELECT round, driver_id, pos FROM grid WHERE season = ?1 AND round >= ?2").bind(season, from).all(),
+    env.DB.prepare("SELECT round, pos, driver_id FROM sprint WHERE season = ?1 AND round >= ?2 ORDER BY round, pos").bind(season, from).all(),
+    env.DB.prepare("SELECT round, player_id, pos, fav_pos, pole_driver, sprint_pos FROM picks WHERE season = ?1 AND round >= ?2").bind(season, from).all(),
   ]);
 
   const players = (playersQ.results || []).map((p) => ({
@@ -566,11 +908,20 @@ async function buildState(env, season, meId) {
   /* Only drivers who are actually racing go in the draw. */
   const pool = drivers.filter((d) => d.active).map((d) => d.id);
 
-  const resultByRound = {}, poleByRound = {}, qualiByRound = {}, sprintByRound = {};
-  for (const r of resultsQ.results || []) (resultByRound[r.round] ||= [])[r.pos - 1] = r.driver_id;
+  const resultByRound = {}, poleByRound = {}, qualiByRound = {}, sprintByRound = {}, provisionalRound = {};
+  const gridByRound = {};
+  for (const r of resultsQ.results || []) {
+    (resultByRound[r.round] ||= [])[r.pos - 1] = r.driver_id;
+    if (r.provisional) provisionalRound[r.round] = true;
+    if (r.grid) (gridByRound[r.round] ||= {})[r.driver_id] = r.grid;
+  }
+  /* The published grid wins: it exists before the race, and after it the two agree. */
+  for (const g of gridQ.results || []) (gridByRound[g.round] ||= {})[g.driver_id] = g.pos;
+  const qualiProvisional = {};
   for (const q of qualiQ.results || []) {
     (qualiByRound[q.round] ||= [])[q.pos - 1] = q.driver_id;
     if (q.pos === 1) poleByRound[q.round] = q.driver_id;
+    if (q.provisional) qualiProvisional[q.round] = true;
   }
   for (const r of sprintQ.results || []) (sprintByRound[r.round] ||= [])[r.pos - 1] = r.driver_id;
 
@@ -583,12 +934,18 @@ async function buildState(env, season, meId) {
   const now = Date.now();
   const all = roundsQ.results || [];
   const startRound = cfg.startRound || (all.find((r) => new Date(r.start) > now)?.round ?? all[0]?.round ?? 1);
+  /* Persist it the first time. Left unset, this recomputes as "the next race"
+     after every round and shifts every driver by one. */
+  if (!cfg.startRound && all.length) await putSetting(env, "startRound", startRound);
   const inPlay = all.filter((r) => r.round >= startRound);
 
+  const draw = assignDraw(pool, cfg.seed, inPlay);
   const rounds = inPlay.map((r, i) => {
     const result = resultByRound[r.round] || null;
     const locked = new Date(r.start).getTime() <= now || !!result;
-    const driverId = drawFor(pool, cfg.seed, i);
+    /* Frozen once callable, so later changes to the pool, the seed or the
+       start round can't rewrite a round people may already have called on. */
+    const driverId = draw[i];
     const raw = pickByRound[r.round] || {};
     const mine = meId ? raw[meId] || null : null;
     /* If the drawn driver never took the start, say so rather than silently
@@ -596,15 +953,33 @@ async function buildState(env, season, meId) {
     const voided = !!result && !!driverId && result.indexOf(driverId) === -1;
     return {
       round: r.round, gi: i, name: r.name, circuit: r.circuit, cc: r.cc,
-      start: r.start, qualiAt: r.quali_at, sprintAt: r.sprint_at,
-      driverId, locked, result, voided,
+      start: r.start,
+      /* Estimate when the calendar doesn't say, so pole still closes. */
+      qualiAt: r.quali_at || new Date(new Date(r.start).getTime() - 24 * 3600 * 1000).toISOString(),
+      qualiAtExact: !!r.quali_at,
+      sprintAt: r.sprint_at,
+      driverId, locked, result, voided, provisional: !!provisionalRound[r.round],
       pole: poleByRound[r.round] || null,
       quali: qualiByRound[r.round] || null,
+      grid: gridByRound[r.round] || null,
+      qualiProvisional: !!qualiProvisional[r.round],
       sprint: sprintByRound[r.round] || null,
       sprintLocked: !!r.sprint_at && new Date(r.sprint_at).getTime() <= now,
       picks: locked ? raw : { count: Object.keys(raw).length, mine },
     };
   });
+
+  const nextOpen = rounds.find((r) => !r.locked);
+  const toFreeze = rounds.filter((r) =>
+    r.driverId &&
+    (r.locked || (nextOpen && r.round === nextOpen.round)) &&
+    !inPlay.find((x) => x.round === r.round)?.drawn);
+  if (toFreeze.length) {
+    await env.DB.batch(toFreeze.map((r) =>
+      env.DB.prepare("UPDATE rounds SET drawn = ?1 WHERE season = ?2 AND round = ?3")
+        .bind(r.driverId, season, r.round)
+    ));
+  }
 
   const acc = {};
   for (const p of players) acc[p.id] = { id: p.id, pts: 0, exact: 0, called: 0, offSum: 0, offN: 0, poles: 0 };
@@ -646,12 +1021,20 @@ async function buildState(env, season, meId) {
 
   const standings = Object.values(acc)
     .map((a) => ({ ...a, avgOff: a.offN ? a.offSum / a.offN : null }))
-    .sort((a, b) => b.pts - a.pts || b.exact - a.exact || a.id.localeCompare(b.id));
+    /* Tie-break: most exact calls, then most poles, then the closest average
+       miss. The id was only ever a last resort and decided nothing meaningful. */
+    .sort((a, b) =>
+      b.pts - a.pts ||
+      b.exact - a.exact ||
+      b.poles - a.poles ||
+      (a.avgOff ?? 99) - (b.avgOff ?? 99) ||
+      a.id.localeCompare(b.id));
 
   return {
     season, me: meId ? players.find((p) => p.id === meId) || null : null,
     players, drivers, rounds, standings,
-    scoring: cfg.scoring, modes: cfg.modes, syncState: cfg.syncState, startRound,
+    scoring: cfg.scoring, modes: cfg.modes, syncState: cfg.syncState,
+    liveState: cfg.liveState || {}, notifyState: cfg.notifyState || {}, startRound,
     allRounds: all.map((r) => ({ round: r.round, name: r.name })),
   };
 }
@@ -709,6 +1092,12 @@ async function handleApi(request, env, url, ctx) {
 
   /* --- the game --- */
 
+  /* One row. The app polls this and only fetches /state when it changes. */
+  if (path === "/pulse" && method === "GET") {
+    const row = await env.DB.prepare("SELECT v FROM settings WHERE k = 'rev'").first();
+    return json({ rev: row ? row.v : "0" });
+  }
+
   if (path === "/state" && method === "GET") {
     return json(await buildState(env, season, meId));
   }
@@ -729,18 +1118,33 @@ async function handleApi(request, env, url, ctx) {
 
     const num = (v, fallback) => (v === undefined ? fallback : v === null ? null : Number(v) || null);
     const pos = num(body.pos, prev?.pos ?? null);
-    const favPos = cfg.modes.favourite ? num(body.favPos, prev?.fav_pos ?? null) : null;
-    let pole = cfg.modes.pole ? (body.pole === undefined ? prev?.pole_driver ?? null : body.pole || null) : null;
+    const favPos = cfg.modes.favourite ? num(body.favPos, prev?.fav_pos ?? null) : prev?.fav_pos ?? null;
+    const pole = cfg.modes.pole
+      ? (body.pole === undefined ? prev?.pole_driver ?? null : body.pole || null)
+      : prev?.pole_driver ?? null;
 
-    const sprintPos = cfg.modes.sprint ? num(body.sprintPos, prev?.sprint_pos ?? null) : null;
+    /* Only sprint weekends have a sprint. Ignore the field entirely otherwise,
+       rather than storing a call that can never be scored. */
+    const isSprintWeekend = !!r.sprint_at;
+    const sprintPos = cfg.modes.sprint && isSprintWeekend
+      ? num(body.sprintPos, prev?.sprint_pos ?? null)
+      : prev?.sprint_pos ?? null;
     if (sprintPos !== null && r.sprint_at && new Date(r.sprint_at).getTime() <= Date.now()
         && sprintPos !== (prev?.sprint_pos ?? null)) {
       return bad("The sprint has started. Sprint calls are closed.", 409);
     }
-    if (pos !== null && (pos < 1 || pos > 30)) return bad("That isn't a valid call.");
-    if (favPos !== null && (favPos < 1 || favPos > 30)) return bad("That isn't a valid call.");
+    /* The grid is as long as the number of drivers actually racing, which the
+       organiser can shorten in Settings. Keep the server in step with it. */
+    const pool = await env.DB.prepare("SELECT COUNT(*) AS n FROM drivers WHERE season = ?1 AND active = 1")
+      .bind(season).first();
+    const maxPos = Math.max(Number(pool?.n) || 0, 1);
+    const ok = (v) => v === null || (v >= 1 && v <= maxPos);
+    if (!ok(pos) || !ok(favPos) || !ok(sprintPos)) {
+      return bad("There are only " + maxPos + " places on the grid.");
+    }
     /* Pole closes when qualifying starts, not when the race does. */
-    if (pole && r.quali_at && new Date(r.quali_at).getTime() <= Date.now() && pole !== (prev?.pole_driver ?? null)) {
+    const qualiAt = r.quali_at || new Date(new Date(r.start).getTime() - 24 * 3600 * 1000).toISOString();
+    if (pole && new Date(qualiAt).getTime() <= Date.now() && pole !== (prev?.pole_driver ?? null)) {
       return bad("Qualifying has started. Pole calls are closed.", 409);
     }
 
@@ -750,6 +1154,7 @@ async function handleApi(request, env, url, ctx) {
        ON CONFLICT(season, round, player_id)
        DO UPDATE SET pos = ?4, fav_pos = ?5, pole_driver = ?6, sprint_pos = ?7, at = ?8`
     ).bind(season, round, me.id, pos, favPos, pole, sprintPos, Date.now()).run();
+    await bump(env);
     return json(await buildState(env, season, me.id));
   }
 
@@ -777,6 +1182,7 @@ async function handleApi(request, env, url, ctx) {
       const { hash, salt } = await hashPassword(String(password));
       await env.DB.prepare("UPDATE players SET pw_hash = ?1, pw_salt = ?2 WHERE id = ?3").bind(hash, salt, me.id).run();
     }
+    await bump(env);
     return json(await buildState(env, season, me.id));
   }
 
@@ -823,6 +1229,7 @@ async function handleApi(request, env, url, ctx) {
     if (!me) return bad("Sign in first.", 401);
     if (!env.ADMIN_CODE || body.code !== env.ADMIN_CODE) return bad("That organiser code isn't right.", 403);
     await env.DB.prepare("UPDATE players SET is_admin = 1 WHERE id = ?1").bind(me.id).run();
+    await bump(env);
     return json(await buildState(env, season, me.id));
   }
 
@@ -836,6 +1243,14 @@ async function handleApi(request, env, url, ctx) {
          immediately and the app watches syncState for progress. */
       await putSetting(env, "syncState", { at: Date.now(), busy: true, step: "starting" });
       ctx.waitUntil(syncAll(env, season));
+      await bump(env);
+      return json(await buildState(env, season, me.id));
+    }
+
+    if (path === "/admin/live" && method === "POST") {
+      /* Runs the OpenF1 check now rather than waiting for the next minute. */
+      await liveTick(env, season);
+      await bump(env);
       return json(await buildState(env, season, me.id));
     }
 
@@ -850,7 +1265,19 @@ async function handleApi(request, env, url, ctx) {
         await putSetting(env, "modes", { ...cur, ...body.modes });
       }
       if (body.startRound !== undefined) await putSetting(env, "startRound", Number(body.startRound) || 0);
-      if (body.reshuffle) await putSetting(env, "seed", Math.floor(Math.random() * 1e9));
+      if (body.reshuffle) {
+        /* Locked rounds keep their frozen driver; everything ahead is cleared
+           so it gets reassigned against the new seed without repeats. */
+        await putSetting(env, "seed", Math.floor(Math.random() * 1e9));
+        await env.DB.prepare(
+          "UPDATE rounds SET drawn = NULL WHERE season = ?1 AND start > ?2"
+        ).bind(season, new Date().toISOString()).run();
+      }
+      if (body.unfreeze) {
+        await env.DB.prepare("UPDATE rounds SET drawn = NULL WHERE season = ?1 AND round >= ?2")
+          .bind(season, Number(body.unfreeze)).run();
+      }
+      await bump(env);
       return json(await buildState(env, season, me.id));
     }
 
@@ -859,6 +1286,7 @@ async function handleApi(request, env, url, ctx) {
       if (!body.id) return bad("Which driver?");
       await env.DB.prepare("UPDATE drivers SET active = ?1 WHERE id = ?2")
         .bind(body.active ? 1 : 0, body.id).run();
+      await bump(env);
       return json(await buildState(env, season, me.id));
     }
 
@@ -871,7 +1299,20 @@ async function handleApi(request, env, url, ctx) {
         env.DB.prepare("INSERT INTO results (season, round, pos, driver_id) VALUES (?1, ?2, ?3, ?4)")
           .bind(season, round, i + 1, did)
       ));
+      await bump(env);
       return json(await buildState(env, season, me.id));
+    }
+
+    if (path === "/admin/password" && method === "POST") {
+      /* No email anywhere in this app, so the organiser issues a temporary
+         password and passes it on. The player changes it from their profile. */
+      if (!body.id) return bad("Which player?");
+      const temp = Math.random().toString(36).slice(2, 6) + "-" + Math.random().toString(36).slice(2, 6);
+      const { hash, salt } = await hashPassword(temp);
+      const r = await env.DB.prepare("UPDATE players SET pw_hash = ?1, pw_salt = ?2 WHERE id = ?3")
+        .bind(hash, salt, body.id).run();
+      if (!r.success) return bad("Couldn't reset that password.");
+      return json({ ok: true, password: temp });
     }
 
     if (path === "/admin/player" && method === "DELETE") {
@@ -882,6 +1323,7 @@ async function handleApi(request, env, url, ctx) {
         env.DB.prepare("DELETE FROM picks WHERE player_id = ?1").bind(id),
         env.DB.prepare("DELETE FROM players WHERE id = ?1").bind(id),
       ]);
+      await bump(env);
       return json(await buildState(env, season, me.id));
     }
 
@@ -925,8 +1367,19 @@ export default {
   async scheduled(event, env, ctx) {
     const season = Number(env.SEASON) || new Date().getUTCFullYear();
     ctx.waitUntil((async () => {
-      try { await syncAll(env, season); } catch (e) { console.error("sync failed", e); }
+      /* Cheap: one indexed query when no session has just happened. */
+      try { await liveTick(env, season); } catch (e) { console.error("live failed", e); }
+
+      /* Every tick, and deliberately not behind the sync. These used to run
+         only after a successful Jolpica pull, so a rate-limit cooldown silently
+         stopped all notifications. Repeats are prevented by the sent-log. */
       try { await runNotifications(env, season); } catch (e) { console.error("notify failed", e); }
+
+      /* The official record, at most once an hour. Driven by the clock rather
+         than by which cron fired, so it can't break on an expression mismatch. */
+      const cfg = await getSettings(env);
+      if (Date.now() - (cfg.syncState?.at || 0) < 55 * 60 * 1000) return;
+      try { await syncAll(env, season); } catch (e) { console.error("sync failed", e); }
     })());
   },
 };

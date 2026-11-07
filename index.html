@@ -3,7 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#05080E" />
+    <meta name="theme-color" content="#05080E" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#F3F5F9" media="(prefers-color-scheme: light)" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -21,10 +22,13 @@
         padding: 0;
         background: #05080E;
         color: #EAEFF6;
-        color-scheme: dark;          /* dark scrollbars and form controls */
+        color-scheme: light dark;    /* scrollbars and controls follow the system */
         overscroll-behavior: none;   /* no white rubber-band on Mac and iOS */
       }
       html, body, #root { min-height: 100%; }
+      @media (prefers-color-scheme: light) {
+        html, body { background: #F3F5F9; color: #0D141E; }
+      }
     </style>
   </head>
   <body>
