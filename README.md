@@ -85,6 +85,34 @@ npm run dev                      # app on :5173, proxies /api to :8787
   photos come from Wikimedia where they're freely licensed. Only the image URL
   is stored, never the image, and the Wikipedia page is kept for credit.
 
+## How live the results are
+
+Two sources, deliberately. **Jolpica** is the official record and the only thing
+that scores: it publishes the classification once the stewards are done, which is
+typically a few hours after the flag. **OpenF1** carries the live running order
+and is used for a provisional result in the meantime, shown in amber and marked
+*provisional* everywhere it appears.
+
+The split matters because post-race penalties change the finishing order. Scoring
+off the live order would mean quietly rewriting the championship later. This way
+you see the result immediately and the points settle when they're final.
+
+| | What you get | When |
+|---|---|---|
+| Free | Provisional result | ~30 min after the flag |
+| Free | Official result, points | A few hours after |
+| OPENF1_TOKEN | Provisional result | ~3 seconds, during the race |
+
+OpenF1's free tier is historical only, where "historical" means more than 30
+minutes after a session ends. Their sponsor tier is EUR 9.90/month and lifts the
+same code path to real time — set `OPENF1_TOKEN` as a secret and nothing else
+changes. Set `OPENF1_ENABLED = "false"` in `wrangler.toml` to turn the whole
+thing off and rely on Jolpica alone.
+
+There are two cron triggers. One runs every minute and exits after a single
+indexed query unless a race is in progress. The other runs hourly for the
+official record and the notifications.
+
 ## Notifications
 
 Real web push, not email and not a chat bot. Generate the keypair once:
@@ -164,6 +192,7 @@ src/App.jsx     The whole front end, one file.
 public/sw.js    Service worker. Shows notifications.
 public/         PWA manifest and icons.
 scripts/        One-off VAPID key generation.
-schema.sql      D1 tables. Run once. Re-running DROPs and recreates.
+schema.sql      D1 tables, for a fresh install. Re-running DROPs and recreates.
+migrations/     Non-destructive upgrades for a database already in use.
 wrangler.toml   Bindings, cron schedule, non-secret vars.
 ```

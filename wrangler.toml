@@ -8,9 +8,10 @@ directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 
-# Hourly: new results in, notifications out.
+# Every minute: check for a race in progress (near-free when nothing is on).
+# Hourly at :17: the official record from Jolpica, then notifications.
 [triggers]
-crons = ["0 * * * *"]
+crons = ["* * * * *", "17 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -21,7 +22,9 @@ database_id = "c0e58132-769c-4775-a444-50bc07a193b8"
 SEASON = "2026"
 USER_AGENT = "GridCall/1.0 (self-hosted F1 prediction game)"
 # From `npm run push:keys`. The public half is not a secret.
-VAPID_PUBLIC_KEY = "BPMdu6P9nTAPr3cmVotSB0CQApbk-PZElrRT6Q-o9O6sPcbjvDKGuTpSC2LWMlkpDI0iIaSNSCKaGX3rTg_MwOQ"
+VAPID_PUBLIC_KEY = "BGI72oO8IGlE9mYEyJQogMZjLXh71Ubk5SSOP2VGyacac-WgNQfXUjAza7702OUNhGqpxY6ZppHcEsriPdcn0RI"
+# Live provisional results from OpenF1. Set to "false" to turn the feature off.
+OPENF1_ENABLED = "true"
 
 # Secrets are NOT here. Set them with `wrangler secret put`:
 #   JOIN_CODE        the code friends need to join
@@ -29,3 +32,6 @@ VAPID_PUBLIC_KEY = "BPMdu6P9nTAPr3cmVotSB0CQApbk-PZElrRT6Q-o9O6sPcbjvDKGuTpSC2LW
 #   ADMIN_CODE       elevates a player to organiser
 #   VAPID_PRIVATE_JWK  the private half of the push keypair
 #   VAPID_SUBJECT      mailto: address, required by the push services
+#   OPENF1_TOKEN       optional. OpenF1's sponsor tier (EUR 9.90/month) for
+#                      results DURING the race. Without it you get them about
+#                      30 minutes after the flag, which is still free.

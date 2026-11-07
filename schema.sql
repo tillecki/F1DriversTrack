@@ -56,6 +56,7 @@ CREATE TABLE results (
   round     INTEGER NOT NULL,
   pos       INTEGER NOT NULL,
   driver_id TEXT NOT NULL,
+  provisional INTEGER NOT NULL DEFAULT 0,   -- 1 = from OpenF1, not yet official
   PRIMARY KEY (season, round, pos)
 );
 
@@ -114,4 +115,5 @@ INSERT INTO settings (k, v) VALUES
   ('seed', '0'),
   ('startRound', '0'),
   ('syncState', '{}'),
-  ('notified', '{}');
+  ('notified', '{}'),
+  ('liveState', '{}');
